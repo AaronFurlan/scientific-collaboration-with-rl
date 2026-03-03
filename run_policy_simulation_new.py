@@ -8,7 +8,7 @@ import numpy as np
 from agent_policies import (create_mixed_policy_population,
                             create_per_group_policy_population,
                             do_nothing_policy, get_policy_function)
-from env.peer_group_environment import PeerGroupEnvironment
+from env.peer_group_environment_new import PeerGroupEnvironment
 from log_simulation import SimLog
 from stats_tracker import SimulationStats
 
@@ -54,7 +54,7 @@ POLICY_CONFIGS = {
 
 def run_simulation_with_policies(
     n_agents: int = 100,
-    max_steps: int = 1_000,
+    max_steps: int = 600,
     max_rewardless_steps: int = 250,
     start_agents: int = 60,
     n_groups: int = 8,
@@ -105,6 +105,7 @@ def run_simulation_with_policies(
     print(
         f"Agent policy distribution: {dict(zip(*np.unique(agent_policies, return_counts=True)))}"
     )
+    print(f"max_steps: {max_steps}, max_rewardless_steps: {max_rewardless_steps}")
 
     # Initialize stats tracker
     stats = SimulationStats()
@@ -175,7 +176,7 @@ def run_simulation_with_policies(
         stats.update(env, observations, rewards, terminations, truncations)
 
         # Print progress
-        if step % 10 == 0:
+        if step % 1 == 0:
             print(f"Step {step}: {stats.summary_line()}")
 
         # Check if all agents are done
@@ -284,11 +285,11 @@ def run_all_reward_functions(seeds=range(10)):
 if __name__ == "__main__":
     # Run a single simulation with balanced policies
     run_simulation_with_policies(
-        n_agents=2000,
+        n_agents=2000, # 2000
         start_agents=200,
         max_steps=100,
-        n_groups=20,
-        max_peer_group_size=100,
+        n_groups=20, # 20
+        max_peer_group_size=100, # 100, needs to be smaller or equal than n_agents / n_groups
         max_rewardless_steps=50,
         policy_distribution={
             "careerist": 1 / 3,
@@ -297,7 +298,7 @@ if __name__ == "__main__":
         },
         output_file_prefix="balanced_multiply_seed42",
         group_policy_homogenous=False,
-        acceptance_threshold=0.44,
+        acceptance_threshold=0.01, #0.44
         novelty_threshold=0.4,
         prestige_threshold=0.4,
         effort_threshold=38,

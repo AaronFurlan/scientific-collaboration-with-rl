@@ -10,6 +10,9 @@ from gymnasium.spaces import Dict as GymDict
 from gymnasium.spaces import Discrete, MultiBinary
 from pettingzoo import ParallelEnv
 from scipy.special import softmax
+import logging
+
+logger = logging.getLogger(__name__)
 
 from .area import Area
 from .project import Project
@@ -20,22 +23,22 @@ class PeerGroupEnvironment(ParallelEnv):
     """Multi-agent environment with peer groups and project opportunities."""
 
     metadata = {
-        "name": "peer_group_environment_v0",
+        "name": "peer_group_environment_new_v0",
     }
 
     def __init__(
         self,
-        start_agents: int = 20,
-        max_agents: int = 80,
-        max_steps: int = 600,
-        max_peer_group_size: int = 60,
-        n_groups: int = 4,
-        n_projects_per_step: int = 1,
-        max_projects_per_agent: int = 6,
-        max_agent_age: int = 1000,
-        max_rewardless_steps: int = 50,
-        growth_rate: float = 0.04,
-        acceptance_threshold: float = 0.5,
+        start_agents: int = 20, # 20
+        max_agents: int = 80, # 80
+        max_steps: int = 100, # 600
+        max_peer_group_size: int = 60, # 60
+        n_groups: int = 4, # 4
+        n_projects_per_step: int = 1, # 1
+        max_projects_per_agent: int = 6, # 6
+        max_agent_age: int = 1000, # 1000
+        max_rewardless_steps: int = 50, # 50
+        growth_rate: float = 0.04, # 0.04
+        acceptance_threshold: float = 0.5, # 0.5
         reward_mode: str = "multiply",
         render_mode: Optional[str] = None,
     ) -> None:
@@ -113,6 +116,9 @@ class PeerGroupEnvironment(ParallelEnv):
             },
         ]
 
+    def print_env_name(self):
+        print(self.metadata["name"])
+
     def _init_project_topic_plane(self, n_gaussians=40) -> None:
         self.area = Area(xlim=(-1, 1), ylim=(-1, 1))
 
@@ -167,14 +173,22 @@ class PeerGroupEnvironment(ParallelEnv):
             if len(group1 - group2) == 0 or len(group2 - group1) == 0:
                 continue
             try:
-                active_only_group1 = self.active_agents[list(group1 - group2)]
-                active_only_group2 = self.active_agents[list(group2 - group1)]
-                agent_idx1 = np.random.choice(active_only_group1)
-                agent_idx2 = np.random.choice(active_only_group2)
+                # Select agent indices that are in group1 but not in group2 and are active
+                candidates1 = np.array(list(group1 - group2), dtype=int)
+                active_candidates1 = candidates1[self.active_agents[candidates1].astype(bool)]
+
+                candidates2 = np.array(list(group2 - group1), dtype=int)
+                active_candidates2 = candidates2[self.active_agents[candidates2].astype(bool)]
+
+                if active_candidates1.size == 0 or active_candidates2.size == 0:
+                    raise ValueError("no active candidates in group pair")
+
+                agent_idx1 = int(np.random.choice(active_candidates1))
+                agent_idx2 = int(np.random.choice(active_candidates2))
 
             except ValueError:
-                print(
-                    f"Warning: Groups {group_idx1} and {group_idx2} couldn't be connected because all members already know each other."
+                logging.debug(
+                    f"Groups {group_idx1} and {group_idx2} couldn't be connected (no suitable active candidates) because all member already know each other."
                 )
 
             # Add agent 1 to agents 2's peer group and vice versa.
@@ -196,8 +210,10 @@ class PeerGroupEnvironment(ParallelEnv):
     def _generate_projects(self) -> None:
         self.open_projects = self.project_templates.copy()
         for i, project in enumerate(self.open_projects):
-            project["required_effort"] = max(
-                1, int(np.random.gumbel(project["required_effort"], 10))
+            # Sample required effort but clamp to a reasonable range so projects can finish within episode
+            sampled_effort = int(np.random.gumbel(project["required_effort"], 2))
+            project["required_effort"] = int(
+                np.clip(sampled_effort, 1, max(1, int(self.n_steps)))
             )
             project["prestige"] = np.clip(
                 np.random.normal(project["prestige"], 0.15), 0.1, 1
@@ -206,9 +222,9 @@ class PeerGroupEnvironment(ParallelEnv):
                 np.random.gumbel(project["novelty"], 0.05), 0.1, 1
             )
 
-            project["time_window"] = np.ceil(
-                project["required_effort"] * np.random.uniform(0.8, 2)
-            )
+            # Time window scaled around required_effort but clamped to episode length
+            time_win = int(np.ceil(project["required_effort"] * np.random.uniform(0.8, 1.5)))
+            project["time_window"] = int(np.clip(time_win, 1, max(1, int(self.n_steps))))
             project["current_effort"] = 0
             project["contributors"] = []
             project["start_time"] = 0
@@ -244,7 +260,7 @@ class PeerGroupEnvironment(ParallelEnv):
         self.agent_steps = np.zeros(self.n_agents, dtype=np.int32)
         self.agent_ages = self.age_distribution.sample(self.n_agents)
         self.rewardless_steps = np.zeros(self.n_agents, dtype=np.int32)
-        self.agent_h_indexes = np.zeros(self.n_agents, dtype=np.int16)
+        self.agent_h_indexes = np.zeros(self.n_agents, dtype=np.int16)    
         self.agent_rewards = np.zeros(
             (self.n_agents, self.n_steps + 1), dtype=np.float32
         )
@@ -327,13 +343,13 @@ class PeerGroupEnvironment(ParallelEnv):
         # Peer collaboration: MultiBinary for peer group
         peer_group = self.peer_groups[self.agent_peer_idx[idx]]
         mask["collaborate_with"] = np.zeros(self.max_peer_group_size, dtype=np.int8)
-        mask["collaborate_with"][: len(peer_group)] = np.where(
-            self.active_agents[peer_group].astype(bool),
-            2,  ## if active unmask
-            mask["collaborate_with"][: len(peer_group)],  # else keep 0
-        )
-        if sum(mask["collaborate_with"]) == 0:
-            breakpoint()
+        # Only fill up to the smaller of the actual peer_group length and the mask capacity
+        pg = np.array(peer_group, dtype=int)
+        L = min(len(pg), self.max_peer_group_size)
+        if L > 0:
+            mask_slice = mask["collaborate_with"][:L]
+            active_slice = self.active_agents[pg[:L]].astype(bool)
+            mask["collaborate_with"][:L] = np.where(active_slice, 2, mask_slice)
 
         # Effort: can only put effort into active projects
         mask["put_effort"] = np.zeros(self.max_projects_per_agent + 1, dtype=np.int8)
@@ -384,20 +400,6 @@ class PeerGroupEnvironment(ParallelEnv):
                         project_idx, peer_group[collaborators]
                     )
                     grouped_collaborators |= set(collaborators)
-            # [NEW][BEGIN] ======
-            # Agents who wanted to collaborate but couldn't form a clique (no
-            # mutual match) should still start a solo project so they are not
-            # silently dropped.
-            new_projects = []
-            for idx_in_group in range(len(peer_group)):
-                if idx_in_group not in grouped_collaborators:
-                    agent_id = peer_group[idx_in_group]
-                    if len(self._get_active_projects(agent_id)) < self.max_projects_per_agent:
-                        solo_proj = self._start_open_project(project_idx, [agent_id])
-                        if solo_proj is not None:
-                            new_projects.append((solo_proj, [agent_id]))
-            return new_projects
-            # [NEW][END] ======
 
     def _start_open_project(
         self, project_idx: int, contributors: List[int]
@@ -614,18 +616,12 @@ class PeerGroupEnvironment(ParallelEnv):
         self.actions = actions
         self.timestep += 1
 
-        # Per-agent step diagnostics (populated below, returned in infos)
-        _step_effort_applied: Dict[int, float] = {}   # idx -> effort amount this step
-        _step_effort_invalid: Dict[int, bool] = {}     # idx -> True if put_effort was invalid
-        _step_choose_effective: Dict[int, bool] = {}   # idx -> True if choose_project led to a slot
-
         # Track which open projects are selected to be started this step
         agent_project_choices: Dict[int] = {}
         for agent, action in actions.items():
             idx = self.agent_to_id[agent]
             chosen_project = action["choose_project"]
 
-            chose_effectively = False
             if (
                 chosen_project > 0
                 and len(self._get_active_projects(idx)) < self.max_projects_per_agent
@@ -633,22 +629,16 @@ class PeerGroupEnvironment(ParallelEnv):
                 open_proj_idx = chosen_project - 1
                 if open_proj_idx < len(self.open_projects):
                     agent_project_choices[idx] = open_proj_idx
-                    chose_effectively = True
-            _step_choose_effective[idx] = chose_effectively
 
             # Apply effort to running projects
-            # put_effort is a 1-based slot index into agent_active_projects.
-            # Check that the slot exists and contains a project.
-            effort_applied = 0.0
-            effort_invalid = False
             if action["put_effort"] > 0:
-                selected_project = action["put_effort"] - 1
-                effort_project_id = (
-                    self.agent_active_projects[idx][selected_project]
-                    if selected_project < len(self.agent_active_projects[idx])
-                    else None
-                )
-                if effort_project_id is not None:
+                selected_project = int(action["put_effort"]) - 1
+                # Ensure selected slot index is valid and contains a project id
+                if (
+                    0 <= selected_project < len(self.agent_active_projects[idx])
+                    and self.agent_active_projects[idx][selected_project] is not None
+                ):
+                    effort_project_id = self.agent_active_projects[idx][selected_project]
                     effort_project = self.projects[effort_project_id]
                     contributors_idx = (
                         list(effort_project.contributors).index(idx)
@@ -662,12 +652,8 @@ class PeerGroupEnvironment(ParallelEnv):
 
                     self.projects[effort_project_id].add_effort(effort_amount)
                     self.agent_project_effort[idx][effort_project_id] += effort_amount
-                    effort_applied = float(effort_amount)
                 else:
-                    # put_effort pointed at an empty slot -> invalid
-                    effort_invalid = True
-            _step_effort_applied[idx] = effort_applied
-            _step_effort_invalid[idx] = effort_invalid
+                    logging.debug(f"Couldn't find project slot {selected_project} for agent {idx}")
         # Collaboration intents (for each agent, with their peers)
         for peer_group in self.peer_groups:
             peer_group = np.array((peer_group))
@@ -699,13 +685,25 @@ class PeerGroupEnvironment(ParallelEnv):
                     collaborators_intents = (
                         collaborators_intents & collaborators_intents.T
                     )
+                    not_enough_collaborators = np.sum(collaborators_intents, axis=0)
+                    # get indices of nodes with connections less than group size
+                    to_remove_mask = np.sum(collaborators_intents, axis=0) < len(collaborator_group)
+                    to_remove_idx = np.where(to_remove_mask)[0]
+                    if to_remove_idx.size > 0:
+                        collaborators_intents = np.delete(collaborators_intents, to_remove_idx, axis=0)
+                        collaborators_intents = np.delete(collaborators_intents, to_remove_idx, axis=1)
+                        collaborator_group = np.delete(collaborator_group, to_remove_idx)
 
-                    # Pass ALL agents who chose this project to _find_project_setting.
-                    # That method already handles: (a) collaborative clique-finding for
-                    # agents with mutual edges, and (b) solo-project fallback for
-                    # agents without mutual matches.  The previous filter here was
-                    # buggy (used values as indices for np.delete) and would
-                    # systematically remove solo agents.
+                    # Degree (number of mutual collaboration edges) per node
+                    degrees = np.sum(collaborators_intents, axis=0)
+                    # Indices of nodes with degree less than the collaborator_group size -> remove them
+                    to_remove_idx = np.where(degrees < len(collaborator_group))[0]
+                    if to_remove_idx.size > 0:
+                        # Remove the rows/columns corresponding to nodes with insufficient degree
+                        collaborators_intents = np.delete(collaborators_intents, to_remove_idx, axis=0)
+                        collaborators_intents = np.delete(collaborators_intents, to_remove_idx, axis=1)
+                        collaborator_group = np.delete(collaborator_group, to_remove_idx)
+
                     self._find_project_setting(
                         choice, collaborator_group, collaborators_intents
                     )
@@ -739,6 +737,11 @@ class PeerGroupEnvironment(ParallelEnv):
 
         new_distances = []
         for p in due_projects:
+            # Debug: log project state before quality/reward calc
+            try:
+                logger.debug(f"Due project {p.project_id}: current_effort={p.current_effort}, required_effort={p.required_effort}, start_time={p.start_time}, time_window={p.time_window}")
+            except Exception:
+                logger.debug("Due project: couldn't read project fields")
             if len(published_projects) > 0:
                 distances = Area.distance(
                     [pp.kene for pp in published_projects], p.kene
@@ -759,6 +762,8 @@ class PeerGroupEnvironment(ParallelEnv):
             reward = p.calculate_reward(
                 quality, threshold=self.acceptance_threshold, noise_factor=0.2
             )
+            # Debug: log calculated quality and reward
+            logger.debug(f"Project {p.project_id} quality={quality:.4f} reward={reward}")
 
             if reward > 0 and distances is not None:
                 new_distances.append(distances)
@@ -791,7 +796,7 @@ class PeerGroupEnvironment(ParallelEnv):
             max(0, self.timestep - self.max_rewardless_steps) : self.timestep,
         ]
         per_step_reward_mean = np.nanmean(in_window_rewards, axis=1)
-        cutoff = np.percentile(per_step_reward_mean, 25)
+        cutoff = np.percentile(per_step_reward_mean, 25) if len(per_step_reward_mean) > 0 else -np.inf
         # Update agent ages, steps, rewardless steps
         active_idx = 0
         for idx, agent in enumerate(self.agents):
@@ -870,9 +875,8 @@ class PeerGroupEnvironment(ParallelEnv):
         #         f"Activated {len(agents_activated_in_step)} agents in step {self.timestep}"
         #     )
 
-        # if not all([a is not None for a in agents_activated_in_step]):
-        #     print("No more agents to activate!")
-
+        if not all([a is not None for a in agents_activated_in_step]):
+            logging.debug("No more agents to activate!")
         # Prepare next obs/mask
         observations = {}
         for agent in self.agents:
@@ -881,50 +885,10 @@ class PeerGroupEnvironment(ParallelEnv):
             self.observations[agent] = obs
             self.action_masks[agent] = mask
             observations[agent] = {"observation": obs, "action_mask": mask}
-
-        # ------------------------------------------------------------------
-        # Build step-level paper_stats (shared across all agents)
-        # ------------------------------------------------------------------
-        n_projects_total = len(self.projects)
-        n_active_projects = sum(
-            1 for p in self.projects.values() if not p.finished
-        )
-        n_due_projects = sum(
-            1 for p in self.projects.values()
-            if p.is_due(self.timestep) and not p.finished
-        )
-        n_published_projects = sum(
-            1 for p in self.projects.values()
-            if p.finished and p.final_reward is not None and p.final_reward > 0
-        )
-        n_rejected_projects = sum(
-            1 for p in self.projects.values()
-            if p.finished and p.final_reward is not None and p.final_reward == 0
-        )
-
-        paper_stats = {
-            "n_projects_total": n_projects_total,
-            "n_active_projects": n_active_projects,
-            "n_due_projects": n_due_projects,
-            "n_published_projects": n_published_projects,
-            "n_rejected_projects": n_rejected_projects,
-        }
-
-        infos: Dict[str, Dict[str, Any]] = {}
-        for agent in self.agents:
-            idx = self.agent_to_id[agent]
-            agent_info: Dict[str, Any] = {"paper_stats": paper_stats}
-
-            # Per-agent effort diagnostics
-            n_active_agent = len(self._get_active_projects(idx))
-            agent_info["debug_effort"] = {
-                "n_active_projects_agent": n_active_agent,
-                "effort_applied_this_step": _step_effort_applied.get(idx, 0.0),
-                "effort_action_invalid": int(_step_effort_invalid.get(idx, False)),
-                "choose_project_effective": int(_step_choose_effective.get(idx, False)),
-            }
-            infos[agent] = agent_info
-
+        infos = {a: {} for a in self.agents}
+        # print(f"===Rewarsds at step {self.timestep}===")
+        # print(f"Rewards: {self.rewards}")
+        print(f"Mean reward: {np.mean(list(self.rewards.values()))}")
         return observations, self.rewards, terminations, truncations, infos
 
     def _get_observation(self, agent: str) -> Dict[str, Any]:
@@ -995,16 +959,25 @@ class PeerGroupEnvironment(ParallelEnv):
             agent_open_projs[f"project_{i}"] = proj_obs
         return agent_open_projs
 
-    def _get_running_projects_obs(
+    def _get_running_projects_obs_old(
         self, agent_idx: int, peer_group: np.ndarray
     ) -> Dict[str, Dict[str, Any]]:
-        # Projects the agent is currently working on
-        running_obs = {}
-        for p_idx in self._get_active_projects(agent_idx):
-            p = self.projects[p_idx].as_observation_dict()
+
+        # Use the space as template to create stable empty entries
+        rp_space = self.observation_space(f"agent_{agent_idx}")["running_projects"]
+        running_obs = self._zeros_like_space(rp_space)  # dict with keys project_0..project_{max_projects_per_agent-1}
+
+        # Fill slots 0..max_projects_per_agent-1
+        for slot_i, proj_id in enumerate(self.agent_active_projects[agent_idx]):
+            if proj_id is None:
+                continue
+
+            p = self.projects[proj_id].as_observation_dict()
+
             fit_among_peers = np.zeros(self.max_peer_group_size, dtype=np.float32)
             effort_among_peers = np.zeros(self.max_peer_group_size, dtype=np.float32)
             contributors_among_peers = np.zeros(self.max_peer_group_size, dtype=np.int8)
+
             for i, agent_i in enumerate(peer_group):
                 contributors_index = (
                     list(p["contributors"]).index(agent_i)
@@ -1014,8 +987,9 @@ class PeerGroupEnvironment(ParallelEnv):
                 if contributors_index is not None:
                     contributors_among_peers[i] = 1
                     fit_among_peers[i] = p["peer_fit"][contributors_index]
-                    effort_among_peers[i] = self.agent_project_effort[agent_i][p_idx]
+                    effort_among_peers[i] = self.agent_project_effort[agent_i][proj_id]
 
+            # overwrite fields to match your observation_space schema
             p["contributors"] = contributors_among_peers
             p["peer_fit"] = fit_among_peers
             p["contributor_effort"] = effort_among_peers
@@ -1025,7 +999,51 @@ class PeerGroupEnvironment(ParallelEnv):
             )
             del p["start_time"]
             del p["time_window"]
-            running_obs[f"project_{p_idx}"] = p
+
+            running_obs[f"project_{slot_i}"] = p
+
+        return running_obs
+
+    def _get_running_projects_obs(self, agent_idx: int, peer_group: np.ndarray) -> Dict[str, Dict[str, Any]]:
+        # Use the space as template to create stable empty entries
+        rp_space = self.observation_space(f"agent_{agent_idx}")["running_projects"]
+        running_obs = self._zeros_like_space(rp_space)  # dict with keys project_0..project_{max_projects_per_agent-1}
+
+        # Fill slots 0..max_projects_per_agent-1
+        for slot_i, proj_id in enumerate(self.agent_active_projects[agent_idx]):
+            if proj_id is None:
+                continue
+
+            p = self.projects[proj_id].as_observation_dict()
+
+            fit_among_peers = np.zeros(self.max_peer_group_size, dtype=np.float32)
+            effort_among_peers = np.zeros(self.max_peer_group_size, dtype=np.float32)
+            contributors_among_peers = np.zeros(self.max_peer_group_size, dtype=np.int8)
+
+            for i, agent_i in enumerate(peer_group):
+                contributors_index = (
+                    list(p["contributors"]).index(agent_i)
+                    if agent_i in p["contributors"]
+                    else None
+                )
+                if contributors_index is not None:
+                    contributors_among_peers[i] = 1
+                    fit_among_peers[i] = p["peer_fit"][contributors_index]
+                    effort_among_peers[i] = self.agent_project_effort[agent_i][proj_id]
+
+            # overwrite fields to match your observation_space schema
+            p["contributors"] = contributors_among_peers
+            p["peer_fit"] = fit_among_peers
+            p["contributor_effort"] = effort_among_peers
+            p["time_left"] = np.array(
+                [max(0, p["time_window"] - (self.timestep - p["start_time"]))],
+                dtype=np.int32,
+            )
+            del p["start_time"]
+            del p["time_window"]
+
+            running_obs[f"project_{slot_i}"] = p
+
         return running_obs
 
     @functools.lru_cache(maxsize=None)
@@ -1039,7 +1057,7 @@ class PeerGroupEnvironment(ParallelEnv):
                     0, 1e4, (self.max_peer_group_size,), dtype=np.float32
                 ),
                 "peer_h_index": Box(
-                    0, 1e5, (self.max_peer_group_size,), dtype=np.int16
+                    0, np.iinfo(np.int16).max, (self.max_peer_group_size,), dtype=np.int16
                 ),
                 "peer_centroids": Box(
                     -1, 1, (self.max_peer_group_size, 2), dtype=np.float64
@@ -1105,3 +1123,22 @@ class PeerGroupEnvironment(ParallelEnv):
             }
         )
         return space
+
+    # ------------------------------
+    # Modified from original code in peer_group_environment_new.py to be compatible with RLlib's multi-agent API.
+    # ------------------------------
+    def _zeros_like_space(self, space):
+        # Recursive: build a zero observation matching a Gym space
+        if isinstance(space, GymDict):
+            return {k: self._zeros_like_space(s) for k, s in space.spaces.items()}
+        if isinstance(space, Box):
+            return np.zeros(space.shape, dtype=space.dtype)
+        if isinstance(space, MultiBinary):
+            # MultiBinary.n can be int or tuple
+            n = space.n if isinstance(space.n, tuple) else (space.n,)
+            return np.zeros(n, dtype=np.int8)
+        if isinstance(space, Discrete):
+            # Discrete isn't used in obs here, but keep it safe:
+            return np.array(0, dtype=np.int64)
+        raise TypeError(f"Unsupported space type: {type(space)}")
+

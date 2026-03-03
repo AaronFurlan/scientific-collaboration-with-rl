@@ -30,7 +30,8 @@ Run:
 from __future__ import annotations
 
 import argparse
-import pprint
+import math
+import numpy as np
 from typing import Any, Callable, Dict, Optional
 
 import ray
@@ -44,6 +45,343 @@ from agent_policies import (
 )
 from env.peer_group_environment import PeerGroupEnvironment
 from rllib_single_agent_wrapper import RLLibSingleAgentWrapper
+from callbacks.debug_actions_callback import make_action_info_callback
+from callbacks.papers_metrics_callback import PapersMetricsCallback
+
+import os
+import csv
+import wandb
+
+# Optional plotting support
+try:
+    import matplotlib.pyplot as plt
+    _HAS_MATPLOTLIB = True
+except Exception:
+    _HAS_MATPLOTLIB = False
+
+
+# Helper: safe float conversion
+def _safe_float(x: Any) -> float:
+    try:
+        if x is None:
+            return float("nan")
+        if isinstance(x, float):
+            return float(x)
+        return float(x)
+    except Exception:
+        return float("nan")
+
+
+def wandb_sanitize(metrics: Dict[str, Any]) -> Dict[str, Any]:
+    """Return a WandB-safe copy of metrics.
+
+    - Keep only scalar ints/floats/bools.
+    - Drop None and NaN/Inf.
+    - Convert numpy scalar types to Python scalars if numpy is available.
+    - Ignore dict/list/array-like structures (e.g. histograms).
+    """
+
+    safe: Dict[str, Any] = {}
+    for k, v in metrics.items():
+        # Skip obvious non-scalars
+        if isinstance(v, (dict, list, tuple, set)):
+            continue
+
+        # Unwrap numpy scalars if possible
+        if np is not None and isinstance(v, (np.generic,)):
+            v = v.item()
+
+        # Only allow basic scalar types
+        if not isinstance(v, (int, float, bool)):
+            continue
+
+        # Drop NaN/Inf
+        if isinstance(v, float) and (math.isnan(v) or math.isinf(v)):
+            continue
+
+        safe[k] = v
+
+    return safe
+
+
+def resolve_checkpoint_path(save_result: Any) -> Optional[str]:
+    """Best-effort extraction of a filesystem path from PPOAlgo.save() result.
+
+    RLlib versions differ in what Algorithm.save() returns. This helper tries to
+    find a usable path without ever assuming that str(obj) is a real path.
+    """
+    if save_result is None:
+        return None
+
+    # Common: Checkpoint-like objects with a .path attribute
+    if hasattr(save_result, "path"):
+        path = getattr(save_result, "path", None)
+        if path:
+            return str(path)
+
+    # Some wrappers expose a .checkpoint with .path
+    if hasattr(save_result, "checkpoint"):
+        cp = getattr(save_result, "checkpoint", None)
+        if cp is not None:
+            if hasattr(cp, "path"):
+                path = getattr(cp, "path", None)
+                if path:
+                    return str(path)
+            if isinstance(cp, str):
+                return cp
+
+    # Direct string path
+    if isinstance(save_result, str):
+        return save_result
+
+    # Dict-like training result that contains checkpoint info
+    if isinstance(save_result, dict):
+        for key in ("checkpoint_path", "best_checkpoint", "checkpoint"):
+            val = save_result.get(key)
+            if hasattr(val, "path"):
+                path = getattr(val, "path", None)
+                if path:
+                    return str(path)
+            if isinstance(val, str):
+                return val
+
+    # Fallback: give up instead of returning a bogus path
+    return None
+
+
+def extract_metrics(result: Dict[str, Any], iteration: int, prev_total_env_steps: int) -> tuple[Dict[str, Any], int]:
+    """Extract a flat metrics dict from an RLlib v2 training result.
+
+    Handles train/eval env_runners, learner stats, timers, perf, and
+    custom_metrics. Also computes a stable global step counter based on
+    timesteps_total (preferred) or num_env_steps_sampled_lifetime/this_iter.
+    """
+    metrics: Dict[str, Any] = {}
+
+    # --------------------
+    # Train env_runners
+    # --------------------
+    train_env = result.get("env_runners", {}) or {}
+
+    train_return_mean = train_env.get("episode_return_mean")
+    train_return_min = train_env.get("episode_return_min")
+    train_return_max = train_env.get("episode_return_max")
+    train_len_mean = train_env.get("episode_len_mean")
+    train_len_min = train_env.get("episode_len_min")
+    train_len_max = train_env.get("episode_len_max")
+    train_num_env_steps = train_env.get("num_env_steps_sampled")
+    train_num_episodes = train_env.get("num_episodes")
+
+    # Timers inside env_runners (may or may not exist)
+    train_env_timers = train_env.get("timers", {}) or {}
+    env_step_timer = train_env_timers.get("env_step_timer")
+    env_reset_timer = train_env_timers.get("env_reset_timer")
+    rlmodule_inference_timer = train_env_timers.get("rl_module_inference_timer") or train_env_timers.get("rlmodule_inference_timer")
+    sample_timer = train_env_timers.get("sample")
+
+    num_env_steps_sampled_lifetime = train_env.get("num_env_steps_sampled_lifetime")
+
+    metrics.update(
+        {
+            "train/episode_return_mean": train_return_mean,
+            "train/episode_return_min": train_return_min,
+            "train/episode_return_max": train_return_max,
+            "train/episode_len_mean": train_len_mean,
+            "train/episode_len_min": train_len_min,
+            "train/episode_len_max": train_len_max,
+            "train/num_env_steps_sampled": train_num_env_steps,
+            "train/num_episodes": train_num_episodes,
+            "train/env_step_timer": env_step_timer,
+            "train/env_reset_timer": env_reset_timer,
+            "train/rlmodule_inference_timer": rlmodule_inference_timer,
+            "train/sample_timer": sample_timer,
+            "train/num_env_steps_sampled_lifetime": num_env_steps_sampled_lifetime,
+        }
+    )
+
+    # --------------------
+    # Evaluation env_runners
+    # --------------------
+    eval_block = result.get("evaluation", {}) or {}
+    eval_env = eval_block.get("env_runners", {}) or {}
+
+    eval_return_mean = eval_env.get("episode_return_mean")
+    eval_return_min = eval_env.get("episode_return_min")
+    eval_return_max = eval_env.get("episode_return_max")
+    eval_return_std = eval_env.get("episode_return_std")
+    eval_len_mean = eval_env.get("episode_len_mean")
+    eval_num_episodes = eval_env.get("num_episodes")
+    eval_num_env_steps = eval_env.get("num_env_steps_sampled")
+    eval_episodes_with_reward_frac = eval_env.get("episodes_with_reward_frac")
+
+    metrics.update(
+        {
+            "eval/episode_return_mean": eval_return_mean,
+            "eval/episode_return_min": eval_return_min,
+            "eval/episode_return_max": eval_return_max,
+            "eval/episode_return_std": eval_return_std,
+            "eval/episode_len_mean": eval_len_mean,
+            "eval/num_episodes": eval_num_episodes,
+            "eval/num_env_steps_sampled": eval_num_env_steps,
+            "eval/episodes_with_reward_frac": eval_episodes_with_reward_frac,
+        }
+    )
+
+    # Explicit ep_return aliases for convenience
+    metrics.update(
+        {
+            "eval/ep_return_mean": eval_return_mean,
+            "eval/ep_return_min": eval_return_min,
+            "eval/ep_return_max": eval_return_max,
+            "train/ep_return_mean": train_return_mean,
+            "train/ep_return_min": train_return_min,
+            "train/ep_return_max": train_return_max,
+        }
+    )
+
+    # --------------------
+    # PPO learner internals
+    # --------------------
+    learner = result.get("learners", {}).get("default_policy", {}) or {}
+    mean_kl = learner.get("mean_kl_loss")
+    entropy = learner.get("entropy")
+    policy_loss = learner.get("policy_loss")
+    value_loss = learner.get("vf_loss")
+    vf_explained_var = learner.get("vf_explained_var")
+
+    # learning rate: try modern key, fall back to older ones
+    lr = (
+        learner.get("default_optimizer_learning_rate")
+        or learner.get("cur_lr")
+        or learner.get("learning_rate")
+    )
+    grad_global_norm = learner.get("gradients_default_optimizer_global_norm")
+    curr_kl_coeff = learner.get("curr_kl_coeff")
+
+    metrics.update(
+        {
+            "ppo/mean_kl": mean_kl,
+            "ppo/entropy": entropy,
+            "ppo/policy_loss": policy_loss,
+            "ppo/value_loss": value_loss,
+            "ppo/vf_explained_var": vf_explained_var,
+            "ppo/lr": lr,
+            "ppo/gradients_default_optimizer_global_norm": grad_global_norm,
+            "ppo/curr_kl_coeff": curr_kl_coeff,
+        }
+    )
+
+    # --------------------
+    # Custom env metrics from callbacks
+    # --------------------
+    custom = result.get("custom_metrics", {}) or {}
+
+    metrics.update(
+        {
+            # sparse reward debug
+            "env/reward_nonzero_frac": custom.get("reward_nonzero_frac_mean"),
+            "env/steps_until_first_reward": custom.get("steps_until_first_reward_mean"),
+            "env/positive_reward_events_per_episode": custom.get("positive_reward_events_per_episode_mean"),
+            "env/rewardless_termination_frac": custom.get("rewardless_termination_flag_mean"),
+            "env/truncated_frac": custom.get("truncated_flag_mean"),
+            "env/terminated_frac": custom.get("terminated_flag_mean"),
+            # environment dynamics
+            "env/published_projects_count": custom.get("published_projects_count_mean"),
+            "env/accepted_projects_count": custom.get("accepted_projects_count_mean"),
+            "env/rejected_projects_count": custom.get("rejected_projects_count_mean"),
+            "env/agent_age_at_end": custom.get("agent_age_at_end_mean"),
+            "env/agent_eliminated_flag": custom.get("agent_eliminated_flag_mean"),
+            # mask repair + action diagnostics (if your wrapper/Callbacks provide them)
+            "mask/repair_rate_total": custom.get("mask_repair_rate_total_mean"),
+            "mask/repair_choose_project_rate": custom.get("mask_repair_choose_project_rate_mean"),
+            "mask/repair_put_effort_rate": custom.get("mask_repair_put_effort_rate_mean"),
+            "mask/repair_collab_rate": custom.get("mask_repair_collab_rate_mean"),
+            "action/choose_project_histogram": custom.get("action_choose_project_histogram_mean"),
+            "action/put_effort_histogram": custom.get("action_put_effort_histogram_mean"),
+            "action/collab_popcount_histogram": custom.get("action_collab_popcount_histogram_mean"),
+            # per-agent paper acceptance stats (from wrapper info dict)
+            "agent0/papers_accepted": custom.get("agent0_papers_accepted_mean"),
+            "agent0/papers_rejected": custom.get("agent0_papers_rejected_mean"),
+            "agent0/papers_completed": custom.get("agent0_papers_completed_mean"),
+            # paper_stats & effort diagnostics (from PapersMetricsCallback)
+            "env/papers_total_mean": custom.get("papers_total_mean"),
+            "env/papers_active_mean": custom.get("papers_active_mean_mean"),
+            "env/papers_published_count_mean": custom.get("papers_published_count_mean"),
+            "env/papers_rejected_count_mean": custom.get("papers_rejected_count_mean"),
+            "agent/effort_applied_sum_mean": custom.get("agent0_effort_applied_sum_mean"),
+            "agent/effort_invalid_frac_mean": custom.get("agent0_effort_invalid_frac_mean"),
+            "agent/choose_effective_frac_mean": custom.get("agent0_choose_effective_frac_mean"),
+            "agent/active_projects_mean": custom.get("agent0_active_projects_mean_mean"),
+        }
+    )
+
+    # --------------------
+    # Timers & perf
+    # --------------------
+    timers = result.get("timers", {}) or {}
+    metrics.update(
+        {
+            "timer/env_runner_sampling": timers.get("env_runner_sampling_timer"),
+            "timer/learner_update": timers.get("learner_update_timer"),
+            "timer/synch_weights": timers.get("synch_weights"),
+            "timer/training_iteration": timers.get("training_iteration"),
+            "timer/training_step": timers.get("training_step"),
+        }
+    )
+
+    perf = result.get("perf", {}) or {}
+    metrics.update(
+        {
+            "perf/cpu_util_percent": perf.get("cpu_util_percent"),
+            "perf/ram_util_percent": perf.get("ram_util_percent"),
+            "perf/time_this_iter_s": perf.get("time_this_iter_s"),
+            "perf/time_total_s": perf.get("time_total_s"),
+        }
+    )
+
+    # Throughput / env steps per sec
+    env_steps_per_sec = result.get("env_steps_per_sec")
+    if env_steps_per_sec is None:
+        env_steps_per_sec = result.get("sampler_results", {}).get("env_steps_per_sec")
+
+    metrics["perf/env_steps_per_sec"] = env_steps_per_sec
+
+    # Detailed train/eval sample times, if present
+    info = result.get("info", {}) or {}
+    learner_info = info.get("learner", {}).get("default_policy", {}) or {}
+    sampler_info = info.get("sampler_results", {}) or {}
+
+    metrics.update(
+        {
+            "perf/train_time_ms": learner_info.get("train_time_ms"),
+            "perf/sample_time_ms": sampler_info.get("sample_time_ms"),
+        }
+    )
+
+    # --------------------
+    # Global step counter (stable)
+    # --------------------
+    timesteps_total = result.get("timesteps_total")
+    timesteps_this_iter = result.get("timesteps_this_iter")
+
+    # Prefer timesteps_total if it's a valid scalar
+    global_step: int
+    if isinstance(timesteps_total, (int, float)):
+        global_step = int(timesteps_total)
+    else:
+        # Try lifetime env steps from env_runners
+        if isinstance(num_env_steps_sampled_lifetime, (int, float)):
+            global_step = int(num_env_steps_sampled_lifetime)
+        else:
+            inc = int(timesteps_this_iter or 0)
+            global_step = int(prev_total_env_steps) + inc
+
+    metrics["iteration"] = iteration
+    metrics["env/total_env_steps"] = global_step
+    metrics["raw/timesteps_total"] = timesteps_total
+    metrics["raw/timesteps_this_iter"] = timesteps_this_iter
+
+    return metrics, global_step
 
 
 # Match run_policy_simulation.py style
@@ -185,6 +523,8 @@ def make_env_creator(
             controlled_agent=controlled_agent_id,
             other_policies=other_policies,
             force_episode_horizon=max_steps,
+            topk_collab=3,
+            topk_apply_to_all_agents=True,
         )
 
         return wrapper
@@ -217,6 +557,15 @@ def main(
     effort_threshold: int,
     # Controlled agent
     controlled_agent_id: str,
+    # Wandb options
+    wandb_project: str | None = None,
+    wandb_entity: str | None = None,
+    wandb_group: str | None = None,
+    wandb_mode: str = "online",
+    # Debug/action info options
+    info_action: bool = False,
+    info_intervall: int = 50,
+    train_batch_size: int = 32000,
 ):
     try:
         from ray.rllib.algorithms.ppo import PPOConfig
@@ -244,8 +593,82 @@ def main(
             "a multi-head action model."
         )
 
-    # 1) Ray init
-    ray.init(ignore_reinit_error=True)
+    # 1) Ray init (robust, begrenzte Ressourcen)
+    ray.init(
+        ignore_reinit_error=True,
+        include_dashboard=False,
+        logging_level="WARNING",
+        _node_ip_address="127.0.0.1",
+        num_cpus=os.cpu_count() or 4,
+        _system_config={
+            # verlängert die Wartezeit für raylet-Startup/GCS
+            "raylet_start_wait_time_s": 60.0,
+        },
+    )
+
+    # 1b) Optional Weights & Biases init (driver-only)
+    use_wandb = False
+    wandb_run = None
+    try:
+        if wandb_mode != "disabled":
+            # Build a flat config dict for wandb
+            wandb_config: Dict[str, Any] = {
+                "algo": "PPO",
+                "framework": framework,
+                "iterations": iterations,
+                "seed": seed,
+                "policy_config_name": policy_config_name,
+                "policy_distribution": policy_distribution,
+                "controlled_agent_id": controlled_agent_id,
+                "reward_function": reward_function,
+                "acceptance_threshold": acceptance_threshold,
+                "env": {
+                    "n_agents": n_agents,
+                    "start_agents": start_agents,
+                    "max_steps": max_steps,
+                    "max_rewardless_steps": max_rewardless_steps,
+                    "n_groups": n_groups,
+                    "max_peer_group_size": max_peer_group_size,
+                    "n_projects_per_step": n_projects_per_step,
+                    "max_projects_per_agent": max_projects_per_agent,
+                    "max_agent_age": max_agent_age,
+                },
+                "heuristics": {
+                    "prestige_threshold": prestige_threshold,
+                    "novelty_threshold": novelty_threshold,
+                    "effort_threshold": effort_threshold,
+                },
+            }
+
+            project = wandb_project or "game-of-science-ppo"
+            run_name = (
+                f"ppo_{policy_config_name}_{reward_function}_s{seed}_n{n_agents}"
+            )
+
+            init_kwargs: Dict[str, Any] = {
+                "project": project,
+                "config": wandb_config,
+                "name": run_name,
+                "mode": wandb_mode,
+            }
+            if wandb_entity:
+                init_kwargs["entity"] = wandb_entity
+            if wandb_group:
+                init_kwargs["group"] = wandb_group
+
+            wandb_run = wandb.init(**init_kwargs)
+            use_wandb = wandb_run is not None
+            if use_wandb:
+                print(f"[wandb] enabled: project={project}, entity={wandb_entity}, run={run_name}")
+            else:
+                print("[wandb] init returned None; WandB disabled.")
+        else:
+            print("[wandb] mode='disabled'; WandB logging turned off.")
+    except Exception as e:
+        # Fall back gracefully if wandb init fails
+        print(f"wandb init failed or disabled: {e}")
+        use_wandb = False
+        wandb_run = None
 
     # 2) Register env
     env_name = "peer_group_single_agent_fixed_population"
@@ -292,17 +715,84 @@ def main(
         )
         .framework(framework)
         # Keep small for debugging; increase later
-        .training(train_batch_size=200)
+        .training(
+            train_batch_size=train_batch_size, #32000
+            gamma=0.99,
+            lambda_=0.95,
+            minibatch_size=min(512, train_batch_size),  # can't exceed train_batch_size
+            num_epochs=8,
+            lr=1e-4,
+            grad_clip=0.5,
+            entropy_coeff=0.01,
+            vf_loss_coeff=1.0,
+            vf_clip_param=5.0,
+            model={
+                "fcnet_hiddens": [256, 256],
+                "fcnet_activation": "tanh",
+            },
+        )
         .debugging(log_level="WARN")
     )
 
-    # Local-mode sampling for debugging
-    config = _set_rollout_workers_compat(config, num_workers=1)
+    config = config.env_runners(
+        rollout_fragment_length=200,
+        # optional, falls verfügbar:
+        # sample_timeout_s=120,
+    )
 
-    # 4) Train
-    algo = config.build_algo()
+    # ------------------------------------------------------------------
+    # Compose callbacks: PapersMetricsCallback (always) + ActionInfoCallback (optional)
+    # ------------------------------------------------------------------
+    callback_classes = [PapersMetricsCallback]
+
+    if info_action:
+        ActionInfoCallback = make_action_info_callback(
+            controlled_agent_id=controlled_agent_id,
+            info_interval=info_intervall,
+            n_projects_per_step=n_projects_per_step,
+            max_projects_per_agent=max_projects_per_agent,
+            max_peer_group_size=max_peer_group_size,
+        )
+        callback_classes.append(ActionInfoCallback)
+
+    if len(callback_classes) == 1:
+        config = config.callbacks(callback_classes[0])
+    else:
+        from ray.rllib.algorithms.callbacks import make_multi_callbacks
+        config = config.callbacks(make_multi_callbacks(callback_classes))
+
+    # Enable evaluation runners and periodic evaluation
+    config = config.evaluation(
+        # Run one evaluation round every iteration.
+        evaluation_interval=5,
+
+        # Create extra evaluation EnvRunners in the evaluation group.
+        evaluation_num_env_runners=2,
+
+        # Run evaluation for a fixed number of episodes (total across all eval runners).
+        evaluation_duration_unit="episodes",
+        evaluation_duration=5,
+        evaluation_config={"explore": False},
+    )
+
+    if info_action:
+        config = _set_rollout_workers_compat(config, num_workers=1)
+        config = config.evaluation(evaluation_num_env_runners=0)
+    else:
+        config = _set_rollout_workers_compat(config, num_workers=12)
+
+    # Rebuild the PPO algorithm with evaluation enabled
+    ppo_with_evaluation = config.build_algo()
+
+    history = []
+
+    best_eval = float("-inf")
+    best_checkpoint_path: Optional[str] = None
+
+    prev_total_env_steps = 0
+
     try:
-        print("\n=== PPO TRAINING (single controlled agent) ===")
+        print("\n=== PPO TRAINING (single controlled agent) with evaluation ===")
         print(f"controlled_agent_id: {controlled_agent_id}")
         print(f"policy_config: {policy_config_name}  (group_policy_homogenous={group_policy_homogenous})")
         print(f"env: n_agents={n_agents}, start_agents={start_agents}, max_steps={max_steps}, "
@@ -311,25 +801,198 @@ def main(
         print(f"reward_function: {reward_function}, acceptance_threshold: {acceptance_threshold}\n")
 
         for i in range(iterations):
-            result = algo.train()
-            print(f"\nIteration {i + 1}/{iterations}")
-            pprint.pprint(
-                {
-                    "episode_reward_mean": result.get("episode_reward_mean"),
-                    "episode_len_mean": result.get("episode_len_mean"),
-                    "timesteps_total": result.get("timesteps_total"),
-                }
+            result = ppo_with_evaluation.train()
+
+            # Metriken extrahieren (uses env_runners-/evaluation-block out of results)
+            metrics, global_step = extract_metrics(result, i, prev_total_env_steps)
+            prev_total_env_steps = global_step
+
+            # Optionale, detaillierte Debug-Ausgaben zu den Raw-Result-Strukturen
+            train_env = result.get("env_runners") or {}
+            eval_env = (result.get("evaluation") or {}).get("env_runners") or {}
+
+            # Safe extraction of eval and train returns for Logging/Checkpointing
+            raw_eval_return = metrics.get("eval/episode_return_mean")
+            raw_train_return = metrics.get("train/episode_return_mean")
+            eval_return_val = _safe_float(raw_eval_return)
+            train_return_val = _safe_float(raw_train_return)
+
+            has_valid_eval = not math.isnan(eval_return_val)
+            has_valid_train = not math.isnan(train_return_val)
+
+            status = ""
+            if not math.isnan(metrics.get("ppo/mean_kl", float("nan"))) and metrics["ppo/mean_kl"] > 0.05:
+                status += "⚠ KL high "
+            if not math.isnan(metrics.get("ppo/vf_explained_var", float("nan"))) and metrics["ppo/vf_explained_var"] < 0:
+                status += "⚠ critic bad "
+            if not has_valid_eval:
+                status += "(no_eval) "
+
+            # Human-readable Returns for logging (handles None/NaN)
+            eval_return_str = "n/a" if not has_valid_eval else f"{eval_return_val:8.2f}"
+            train_return_str = "n/a" if not has_valid_train else f"{train_return_val:8.2f}"
+
+            print(
+                f"Iter {i:03d} | "
+                f"TrainReturn: {train_return_str} | "
+                f"EvalReturn: {eval_return_str} | "
+                f"KL: {metrics['ppo/mean_kl']:6.4f} | "
+                f"VF_var: {metrics['ppo/vf_explained_var']:7.4f} "
+                f"{status}"
             )
+
+            history_entry: Dict[str, Any] = {
+                "iter": i,
+                "eval_return": eval_return_val if has_valid_eval else float("nan"),
+                "kl": metrics["ppo/mean_kl"],
+                "vf_var": metrics["ppo/vf_explained_var"],
+                "episode_reward_mean": raw_train_return,
+                "episode_len_mean": metrics.get("train/episode_len_mean"),
+                "timesteps_total": result.get("timesteps_total"),
+            }
+            history.append(history_entry)
+
+            # uses best_eval to decide whether to save a checkpoint,
+            # but logs the actual eval return (which may be NaN) for transparency
+            if has_valid_eval and eval_return_val > best_eval:
+                try:
+                    chkpt = ppo_with_evaluation.save()
+                    best_checkpoint_path = resolve_checkpoint_path(chkpt)
+                except Exception as e:
+                    print(f"Could not save checkpoint at iter {i}: {e}")
+
+                if use_wandb and best_checkpoint_path is not None:
+                    artifact = wandb.Artifact(name=f"ppo-best-{policy_config_name}-s{seed}", type="model")
+
+                    if os.path.isdir(best_checkpoint_path):
+                        artifact.add_dir(best_checkpoint_path)
+                    elif os.path.isfile(best_checkpoint_path):
+                        artifact.add_file(best_checkpoint_path)
+                    else:
+                        print(f"Checkpoint path not found: {best_checkpoint_path}")
+
+                    wandb.log_artifact(artifact)
+
+            # wandb logging (driver-only): whole metrics dict, stable global step, and error handling
+            if use_wandb:
+                try:
+                    # Stable step: prefer timesteps_total/env steps, else fallback to iteration index
+                    raw_step = result.get("timesteps_total")
+                    if not isinstance(raw_step, (int, float)) or raw_step is None:
+                        raw_step = metrics.get("env/total_env_steps")
+                    if not isinstance(raw_step, (int, float)) or raw_step is None:
+                        raw_step = global_step
+                    if not isinstance(raw_step, (int, float)) or raw_step is None:
+                        raw_step = i
+                    step = int(raw_step)
+
+                    log_dict = wandb_sanitize(metrics)
+                    # Mark first iteration as connectivity check
+                    if i == 0:
+                        log_dict["debug/it_works"] = 1
+
+                    wandb.log(log_dict, step=step)
+                except Exception as e:
+                    print(f"wandb.log failed at iter {i}: {e}")
+
     finally:
-        algo.stop()
+        ppo_with_evaluation.stop()
         ray.shutdown()
+
+        # Upload best checkpoint as artifact if available
+        if use_wandb and best_checkpoint_path is not None:
+            try:
+                artifact = wandb.Artifact(
+                    name=f"ppo-best-{policy_config_name}-s{seed}",
+                    type="model",
+                )
+                artifact.add_dir(best_checkpoint_path)
+                wandb.log_artifact(artifact)
+            except Exception as e:
+                print(f"Failed to log best checkpoint artifact to wandb: {e}")
+
+        if use_wandb and wandb_run is not None:
+            try:
+                wandb.finish()
+            except Exception as e:
+                print(f"wandb.finish() failed: {e}")
+
+    # Persist training history to CSV and plot (if matplotlib is available)
+    results_paths = plot_training_history(history, save_prefix=f"ppo_history_{policy_config_name}_{seed}")
+
+    # Optionally log CSV/PNG as artifacts/files in wandb
+    if use_wandb and results_paths:
+        try:
+            csv_path = results_paths.get("csv")
+            png_path = results_paths.get("png")
+            if csv_path:
+                wandb.save(csv_path)
+            if png_path:
+                wandb.save(png_path)
+        except Exception as e:
+            print(f"wandb save of history artifacts failed: {e}")
+
+
+def plot_training_history(history: list, out_dir: str = "results", save_prefix: str = "ppo_history"):
+    """Save training history to CSV and (if available) plot eval_return, kl and vf_var.
+
+    Expects history to be a list of dicts with keys: 'iter', 'eval_return', 'kl', 'vf_var'.
+    Creates `out_dir/{save_prefix}.csv` and `out_dir/{save_prefix}.png` (if matplotlib present).
+    Returns paths written.
+    """
+    os.makedirs(out_dir, exist_ok=True)
+
+    iters = [h.get("iter", idx) for idx, h in enumerate(history)]
+    evals = [float(h.get("eval_return", float("nan"))) for h in history]
+    kls = [float(h.get("kl", float("nan"))) for h in history]
+    vfs = [float(h.get("vf_var", float("nan"))) for h in history]
+
+    csv_path = os.path.join(out_dir, f"{save_prefix}.csv")
+    with open(csv_path, "w", newline="") as fh:
+        writer = csv.writer(fh)
+        writer.writerow(["iter", "eval_return", "kl", "vf_var"])
+        for i, e, k, v in zip(iters, evals, kls, vfs):
+            writer.writerow([i, e, k, v])
+    print(f"Wrote training CSV: {csv_path}")
+
+    png_path = None
+    if not _HAS_MATPLOTLIB:
+        print("matplotlib not available; skipping plot generation.")
+        return {"csv": csv_path, "png": png_path}
+
+    # Create a single figure with eval_return on left axis and kl/vf_var on right axis
+    fig, ax1 = plt.subplots(figsize=(10, 5))
+    ax1.plot(iters, evals, label="eval_return", color="tab:blue", marker="o")
+    ax1.set_xlabel("iteration")
+    ax1.set_ylabel("eval_return", color="tab:blue")
+    ax1.tick_params(axis="y", labelcolor="tab:blue")
+
+    ax2 = ax1.twinx()
+    ax2.plot(iters, kls, label="kl", color="tab:orange", linestyle="--", marker="x")
+    ax2.plot(iters, vfs, label="vf_var", color="tab:green", linestyle=":", marker="s")
+    ax2.set_ylabel("kl / vf_var")
+
+    # Combined legend
+    lines1, labels1 = ax1.get_legend_handles_labels()
+    lines2, labels2 = ax2.get_legend_handles_labels()
+    ax1.legend(lines1 + lines2, labels1 + labels2, loc="upper left")
+
+    plt.title(save_prefix)
+    fig.tight_layout()
+
+    png_path = os.path.join(out_dir, f"{save_prefix}.png")
+    fig.savefig(png_path)
+    plt.close(fig)
+    print(f"Wrote training plot: {png_path}")
+
+    return {"csv": csv_path, "png": png_path}
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
 
     # RLlib
-    parser.add_argument("--iterations", type=int, default=10)
+    parser.add_argument("--iterations", type=int, default=20)
     parser.add_argument(
         "--framework",
         type=str,
@@ -355,12 +1018,12 @@ if __name__ == "__main__":
     parser.add_argument("--seed", type=int, default=42)
 
     # Env knobs (keep small for PPO + macro-action)
-    parser.add_argument("--n-agents", type=int, default=104)
+    parser.add_argument("--n-agents", type=int, default=64)
     parser.add_argument("--start-agents", type=int, default=60)
-    parser.add_argument("--max-steps", type=int, default=200)
-    parser.add_argument("--max-rewardless-steps", type=int, default=50)
+    parser.add_argument("--max-steps", type=int, default=500)
+    parser.add_argument("--max-rewardless-steps", type=int, default=500)
     parser.add_argument("--n-groups", type=int, default=8)
-    parser.add_argument("--max-peer-group-size", type=int, default=13)  # keep small!
+    parser.add_argument("--max-peer-group-size", type=int, default=8)  # keep small!
     parser.add_argument("--n-projects-per-step", type=int, default=1)
     parser.add_argument("--max-projects-per-agent", type=int, default=6)
     parser.add_argument("--max-agent-age", type=int, default=750)
@@ -376,6 +1039,35 @@ if __name__ == "__main__":
 
     # Controlled agent
     parser.add_argument("--controlled-agent-id", type=str, default="agent_0")
+
+    # Wandb options
+    parser.add_argument("--wandb-project", type=str, default="RL in the Game of Science")
+    parser.add_argument("--wandb-entity", type=str, default="rl_in_the_game_of_science")
+    parser.add_argument("--wandb-group", type=str, default=None)
+    parser.add_argument("--wandb-mode", type=str, default="online", choices=["online", "offline", "disabled"])
+
+    # Action debug / info options
+    parser.add_argument(
+        "--info-action",
+        action="store_true",
+        default=True,
+        help="Periodically prints the chosen action of the controlled agent (enabled by default).",
+    )
+    parser.add_argument(
+        "--no-info-action",
+        dest="info_action",
+        action="store_false",
+        help="Disable periodic action printing.",
+    )
+    parser.add_argument(
+        "--info-intervall",
+        type=int,
+        default=50,
+        help="Print the controlled agent's action every N env steps within an episode.",
+    )
+
+    parser.add_argument("--train-batch-size", type=int, default=32000,
+                        help="Number of env steps collected per training iteration.")
 
     args = parser.parse_args()
 
@@ -400,4 +1092,11 @@ if __name__ == "__main__":
         novelty_threshold=args.novelty_threshold,
         effort_threshold=args.effort_threshold,
         controlled_agent_id=args.controlled_agent_id,
+        wandb_project=args.wandb_project,
+        wandb_entity=args.wandb_entity,
+        wandb_group=args.wandb_group,
+        wandb_mode=args.wandb_mode,
+        info_action=args.info_action,
+        info_intervall=args.info_intervall,
+        train_batch_size=args.train_batch_size,
     )

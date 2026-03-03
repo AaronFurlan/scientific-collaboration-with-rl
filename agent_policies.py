@@ -171,7 +171,7 @@ def orthodox_scientist_policy(
     **kwargs,
 ) -> Dict[str, Any]:
 
-    project_opportunities = list(observation.get("project_opportunities").values())
+    project_opportunities = list(observation.get("project_opportunities", {}).values())
     current = observation.get("running_projects", {})
     if _emergency_continue_any(current):
         chosen_project = 0
@@ -189,15 +189,22 @@ def orthodox_scientist_policy(
             chosen_project = 0
 
     # Collaboration: only collaborate with agents who are close in topic centroid
-    peer_group_active = np.array(observation.get("peer_group"), dtype=np.int8)
+    peer_group_active = np.array(observation.get("peer_group", []), dtype=np.int8)
     collaborate_mask = action_mask.get("collaborate_with")
 
-    # Get agent's own topic centroid
-    own_centroid = np.array(observation.get("self_centroid")[0])
-    peer_centroids = np.array(observation.get("peer_centroids"))
+    # Get agent's own topic centroid. New env uses 'self_centroids' (shape (1,2)).
+    # Keep fallback to older 'self_centroid' for backward compatibility.
+    sc = observation.get("self_centroids") if observation.get("self_centroids") is not None else observation.get("self_centroid")
+    if sc is None:
+        own_centroid = np.array([])
+    else:
+        sc_arr = np.array(sc)
+        own_centroid = sc_arr[0] if sc_arr.size > 0 else np.array([])
+
+    peer_centroids = np.array(observation.get("peer_centroids", []))
 
     # Calculate distances to all peers
-    if len(peer_centroids) > 0 and len(own_centroid) > 0:
+    if peer_centroids.size > 0 and own_centroid.size > 0:
         distances = Area.distance(own_centroid, peer_centroids)
         # Collaborate only with peers closer than average distance
         avg_distance = np.mean(distances)

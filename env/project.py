@@ -110,10 +110,13 @@ class Project:
         return topic_area.value_at(*self.kene)
 
     def calculate_reward(self, quality, threshold=0.5, noise_factor=0.15) -> float:
+        # If quality surpasses threshold scaled by prestige, assign a positive reward
         if quality > threshold * self.prestige:
             self.final_reward = self.prestige + np.random.normal(0, noise_factor)
+            # Ensure reward is non-negative
+            self.final_reward = float(max(0.0, self.final_reward))
         else:
-            self.final_reward = 0
+            self.final_reward = 0.0
         return self.final_reward
 
     def to_dict(self) -> Dict[str, Any]:

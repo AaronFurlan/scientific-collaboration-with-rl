@@ -1,6 +1,6 @@
 import numpy as np
 
-from env.peer_group_environment import PeerGroupEnvironment
+from env.peer_group_environment_new import PeerGroupEnvironment
 
 
 def test_connect_peer_groups_adds_agents():
