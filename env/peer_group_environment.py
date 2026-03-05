@@ -102,6 +102,17 @@ class PeerGroupEnvironment(ParallelEnv):
         self.projects: Dict[str, Project] = {}
         # the ared in which the projects will be situated
         self.area: Area = None
+
+        # --- Episode-level metrics for truncation/horizon analysis ---
+        self._ep_projects_started_total: int = 0
+        self._ep_projects_due_total: int = 0
+        self._ep_projects_evaluated_total: int = 0
+        self._ep_projects_published_total: int = 0
+        self._ep_projects_rejected_total: int = 0
+        self._ep_projects_due_within_episode: int = 0
+        self._ep_n_time_window_clipped: int = 0
+        self._ep_started_start_times: List[float] = []
+        self._ep_started_time_windows: List[float] = []
         self.distances = []
         self.global_density = 1
         self.project_templates: List[Dict[str, Any]] = [
@@ -194,7 +205,11 @@ class PeerGroupEnvironment(ParallelEnv):
         return None
 
     def _generate_projects(self) -> None:
-        self.open_projects = self.project_templates.copy()
+
+        # DEBUG: check if templates drift
+        # print("TEMPLATE required_effort:", [p["required_effort"] for p in self.project_templates[:3]])
+
+        self.open_projects = deepcopy(self.project_templates) # from copy to deepcopy
         for i, project in enumerate(self.open_projects):
             project["required_effort"] = max(
                 1, int(np.random.gumbel(project["required_effort"], 10))
@@ -263,6 +278,17 @@ class PeerGroupEnvironment(ParallelEnv):
         self.terminated_agents = np.zeros(self.n_agents, dtype=np.int8)
         self.distances = []
         self.global_density = 1
+
+        # Reset episode-level metrics for horizon analysis
+        self._ep_projects_started_total = 0
+        self._ep_projects_due_total = 0
+        self._ep_projects_evaluated_total = 0
+        self._ep_projects_published_total = 0
+        self._ep_projects_rejected_total = 0
+        self._ep_projects_due_within_episode = 0
+        self._ep_n_time_window_clipped = 0
+        self._ep_started_start_times = []
+        self._ep_started_time_windows = []
 
         # Reinitialize core structures
         self._init_project_topic_plane()
@@ -431,6 +457,16 @@ class PeerGroupEnvironment(ParallelEnv):
             for agent_i in proj_object.contributors
         ]
         self.projects[new_running_proj["id"]] = proj_object
+        # --- Episode metrics: track started project ---
+        self._ep_projects_started_total += 1
+        tw = float(proj_object.time_window)
+        st = float(proj_object.start_time)
+        self._ep_started_start_times.append(st)
+        self._ep_started_time_windows.append(tw)
+        if st + tw <= self.n_steps:
+            self._ep_projects_due_within_episode += 1
+        if tw > 200:
+            self._ep_n_time_window_clipped += 1
         return project_id
 
     def _locate_project_in_plane(self, new_project: Project) -> np.array:
@@ -721,6 +757,10 @@ class PeerGroupEnvironment(ParallelEnv):
             if p.is_due(self.timestep) and p.finished is False
         ]
 
+        # --- Episode metrics: track due & evaluated ---
+        self._ep_projects_due_total += len(due_projects)
+        self._ep_projects_evaluated_total += len(due_projects)
+
         if len(published_projects) > 1 and self.timestep % 10 == 0:
             # sample up to 1000 projects and take the average distance to their 10 closest neighbors
             if len(self.distances) > 1000:
@@ -775,6 +815,11 @@ class PeerGroupEnvironment(ParallelEnv):
                 self._distribute_rewards_by_effort(p, reward)
 
             p.finished = True
+            # --- Episode metrics: track published vs rejected ---
+            if reward > 0:
+                self._ep_projects_published_total += 1
+            else:
+                self._ep_projects_rejected_total += 1
 
         new_projects = [p for p in due_projects if p.final_reward > 0]
         if len(new_projects) > 0:
@@ -926,6 +971,88 @@ class PeerGroupEnvironment(ParallelEnv):
             infos[agent] = agent_info
 
         return observations, self.rewards, terminations, truncations, infos
+
+    # ------------------------------------------------------------------
+    # Episode-level metrics for horizon / truncation analysis
+    # ------------------------------------------------------------------
+    def get_episode_metrics(self) -> Dict[str, Any]:
+        """Compute and return episode-level metrics for truncation analysis.
+
+        Call this at episode end (terminated or truncated) to get a flat dict
+        with project-horizon feasibility, open-project, and obs-clipping stats.
+        """
+        started = self._ep_projects_started_total
+
+        # --- A) Project horizon feasibility ---
+        due_within = self._ep_projects_due_within_episode
+        due_rate = due_within / max(1, started)
+
+        start_times = np.asarray(self._ep_started_start_times, dtype=np.float64)
+        time_windows = np.asarray(self._ep_started_time_windows, dtype=np.float64)
+
+        if len(start_times) > 0:
+            st_mean = float(np.mean(start_times))
+            st_p95 = float(np.percentile(start_times, 95))
+            st_max = float(np.max(start_times))
+            tw_mean = float(np.mean(time_windows))
+            tw_p95 = float(np.percentile(time_windows, 95))
+            tw_max = float(np.max(time_windows))
+        else:
+            st_mean = st_p95 = st_max = 0.0
+            tw_mean = tw_p95 = tw_max = 0.0
+
+        # --- B) Open projects at episode end ---
+        open_projects = [
+            p for p in self.projects.values() if not p.finished
+        ]
+        projects_open_end = len(open_projects)
+
+        if projects_open_end > 0:
+            ttd = np.array(
+                [
+                    (p.start_time + p.time_window) - self.timestep
+                    for p in open_projects
+                ],
+                dtype=np.float64,
+            )
+            open_ttd_mean = float(np.mean(ttd))
+            open_ttd_min = float(np.min(ttd))
+            open_ttd_p95 = float(np.percentile(ttd, 95))
+            open_ttd_max = float(np.max(ttd))
+        else:
+            open_ttd_mean = open_ttd_min = open_ttd_p95 = open_ttd_max = 0.0
+
+        # --- C) Observation clipping for time_window (obs space caps at 200) ---
+        n_clipped = self._ep_n_time_window_clipped
+        clipped_rate = n_clipped / max(1, started)
+
+        # Max true time_window among those > 200
+        over_200 = time_windows[time_windows > 200] if len(time_windows) > 0 else np.array([])
+        tw_over_200_max = float(np.max(over_200)) if len(over_200) > 0 else 0.0
+
+        return {
+            "projects_started_total": started,
+            "projects_due_total": self._ep_projects_due_total,
+            "projects_evaluated_total": self._ep_projects_evaluated_total,
+            "projects_published_total": self._ep_projects_published_total,
+            "projects_rejected_total": self._ep_projects_rejected_total,
+            "projects_due_within_episode_count": due_within,
+            "due_within_episode_rate": due_rate,
+            "started_start_time_mean": st_mean,
+            "started_start_time_p95": st_p95,
+            "started_start_time_max": st_max,
+            "started_time_window_mean": tw_mean,
+            "started_time_window_p95": tw_p95,
+            "started_time_window_max": tw_max,
+            "projects_open_end": projects_open_end,
+            "open_time_to_deadline_mean": open_ttd_mean,
+            "open_time_to_deadline_min": open_ttd_min,
+            "open_time_to_deadline_p95": open_ttd_p95,
+            "open_time_to_deadline_max": open_ttd_max,
+            "n_time_window_clipped": n_clipped,
+            "clipped_rate": clipped_rate,
+            "true_time_window_over_200_max": tw_over_200_max,
+        }
 
     def _get_observation(self, agent: str) -> Dict[str, Any]:
         idx = self.agent_to_id[agent]

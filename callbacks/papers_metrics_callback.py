@@ -29,7 +29,16 @@ _DEBUG = os.environ.get("PAPERS_CALLBACK_DEBUG", "0") == "1"
 
 
 class PapersMetricsCallback(DefaultCallbacks):
-    """Aggregate paper_stats and debug_effort from env info into custom metrics."""
+    """Aggregate paper_stats and debug_effort from env info into custom metrics.
+
+    Uses an internal dict keyed by episode.id_ because SingleAgentEpisode
+    (new API stack) uses __slots__ and has no user_data attribute.
+    """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # episode.id_ -> accumulator dict.  Cleaned up in on_episode_end.
+        self._ep_data: Dict[str, dict] = {}
 
     # ------------------------------------------------------------------
     # Episode start: initialise accumulators
@@ -48,18 +57,22 @@ class PapersMetricsCallback(DefaultCallbacks):
         policies=None,
         **kwargs,
     ):
-        ud = self._get_user_data(episode)
-        # Paper stats accumulators (per-step lists for mean/last)
-        ud["_ps_total"] = []
-        ud["_ps_active"] = []
-        ud["_ps_due"] = []
-        ud["_ps_published"] = []
-        ud["_ps_rejected"] = []
-        # Effort diagnostics accumulators
-        ud["_eff_applied"] = []
-        ud["_eff_invalid"] = []
-        ud["_choose_effective"] = []
-        ud["_n_active_agent"] = []
+        eid = self._episode_id(episode)
+        self._ep_data[eid] = {
+            # Paper stats accumulators (per-step lists for mean/last)
+            "_ps_total": [],
+            "_ps_active": [],
+            "_ps_due": [],
+            "_ps_published": [],
+            "_ps_rejected": [],
+            # Effort diagnostics accumulators
+            "_eff_applied": [],
+            "_eff_invalid": [],
+            "_choose_effective": [],
+            "_n_active_agent": [],
+            # Horizon / truncation analysis (captured from last info)
+            "_env_metrics": None,
+        }
 
     # ------------------------------------------------------------------
     # Episode step: read info and accumulate
@@ -82,32 +95,43 @@ class PapersMetricsCallback(DefaultCallbacks):
         if not isinstance(info, dict):
             return
 
-        ud = self._get_user_data(episode)
+        eid = self._episode_id(episode)
+        ud = self._ep_data.get(eid)
+        if ud is None:
+            # on_episode_start was not called (should not happen, but be safe)
+            return
 
         # Paper stats
         ps = info.get("paper_stats")
         if isinstance(ps, dict):
-            ud.setdefault("_ps_total", []).append(ps.get("n_projects_total", 0))
-            ud.setdefault("_ps_active", []).append(ps.get("n_active_projects", 0))
-            ud.setdefault("_ps_due", []).append(ps.get("n_due_projects", 0))
-            ud.setdefault("_ps_published", []).append(ps.get("n_published_projects", 0))
-            ud.setdefault("_ps_rejected", []).append(ps.get("n_rejected_projects", 0))
+            ud["_ps_total"].append(ps.get("n_projects_total", 0))
+            ud["_ps_active"].append(ps.get("n_active_projects", 0))
+            ud["_ps_due"].append(ps.get("n_due_projects", 0))
+            ud["_ps_published"].append(ps.get("n_published_projects", 0))
+            ud["_ps_rejected"].append(ps.get("n_rejected_projects", 0))
 
         # Effort diagnostics
         de = info.get("debug_effort")
         if isinstance(de, dict):
-            ud.setdefault("_eff_applied", []).append(
+            ud["_eff_applied"].append(
                 float(de.get("effort_applied_this_step", 0.0))
             )
-            ud.setdefault("_eff_invalid", []).append(
+            ud["_eff_invalid"].append(
                 int(de.get("effort_action_invalid", 0))
             )
-            ud.setdefault("_choose_effective", []).append(
+            ud["_choose_effective"].append(
                 int(de.get("choose_project_effective", 0))
             )
-            ud.setdefault("_n_active_agent", []).append(
+            ud["_n_active_agent"].append(
                 int(de.get("n_active_projects_agent", 0))
             )
+
+        # Horizon / truncation analysis — env_metrics is only present in the
+        # terminal step's info (injected by the wrapper).  Capture it whenever
+        # it appears so it is available in on_episode_end via the accumulator.
+        em = info.get("env_metrics")
+        if isinstance(em, dict):
+            ud["_env_metrics"] = em
 
     # ------------------------------------------------------------------
     # Episode end: compute aggregates and write custom_metrics
@@ -126,7 +150,10 @@ class PapersMetricsCallback(DefaultCallbacks):
         policies=None,
         **kwargs,
     ):
-        ud = self._get_user_data(episode)
+        eid = self._episode_id(episode)
+        ud = self._ep_data.pop(eid, None)
+        if ud is None:
+            return
 
         # Paper stats: last observed value (snapshot at end of episode)
         ps_total = ud.get("_ps_total", [])
@@ -161,6 +188,20 @@ class PapersMetricsCallback(DefaultCallbacks):
             "agent0_active_projects_mean": active_projects_agent_mean,
         }
 
+        # ------------------------------------------------------------------
+        # Episode-level env_metrics (horizon / truncation analysis)
+        # Primary source: accumulated during on_episode_step.
+        # Fallback: read from the last info dict of the episode object.
+        # ------------------------------------------------------------------
+        em = ud.get("_env_metrics")
+        if em is None:
+            last_info = self._get_last_info(episode)
+            if isinstance(last_info, dict):
+                em = last_info.get("env_metrics")
+        if isinstance(em, dict):
+            for k, v in em.items():
+                metrics[f"horizon_{k}"] = float(v)
+
         # Write to custom_metrics (old stack) and metrics_logger (new stack)
         self._write_metrics(episode, metrics_logger, metrics)
 
@@ -175,22 +216,29 @@ class PapersMetricsCallback(DefaultCallbacks):
                 f"choose_eff={choose_effective_frac:.3f} "
                 f"active_agent_mean={active_projects_agent_mean:.1f}"
             )
+            if isinstance(em, dict):
+                print(
+                    f"[PAPERS] env_metrics: started={em.get('projects_started_total', '?')} "
+                    f"due_rate={em.get('due_within_episode_rate', '?'):.3f} "
+                    f"open_end={em.get('projects_open_end', '?')} "
+                    f"clipped_rate={em.get('clipped_rate', '?'):.3f}"
+                )
 
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _get_user_data(episode) -> dict:
-        """Return episode.user_data (new & old stack compatible)."""
-        if hasattr(episode, "user_data"):
-            if episode.user_data is None:
-                episode.user_data = {}
-            return episode.user_data
-        # Fallback: attach a dict
-        if not hasattr(episode, "_papers_ud"):
-            episode._papers_ud = {}
-        return episode._papers_ud
+    def _episode_id(episode) -> str:
+        """Return a stable episode identifier (works on new & old stack)."""
+        # New stack: SingleAgentEpisode has .id_ (str/uuid)
+        if hasattr(episode, "id_"):
+            return str(episode.id_)
+        # Old stack: EpisodeV2 has .episode_id
+        if hasattr(episode, "episode_id"):
+            return str(episode.episode_id)
+        # Last resort: object id
+        return str(id(episode))
 
     @staticmethod
     def _get_last_info(episode) -> Optional[dict]:

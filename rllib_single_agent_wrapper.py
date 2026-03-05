@@ -693,6 +693,12 @@ class RLLibSingleAgentWrapper(gym.Env):
                     info["papers_rejected"] = completed - accepted
             except Exception:
                 pass
+            # Inject episode-level env_metrics for horizon/truncation analysis
+            try:
+                if hasattr(self.env, "get_episode_metrics"):
+                    info["env_metrics"] = self.env.get_episode_metrics()
+            except Exception:
+                pass
             logger.info(
                 "Episode END for %s (t=%s) -> terminated=%s truncated=%s reward=%s (agent missing)",
                 self.current_controlled,
@@ -762,6 +768,14 @@ class RLLibSingleAgentWrapper(gym.Env):
                 reward,
             )
             # print(f"[WRAPPER] Episode END for {self.current_controlled} (t={self._t}) -> terminated={terminated} truncated={truncated} reward={reward}")
+
+            # Inject episode-level env_metrics for horizon/truncation analysis
+            try:
+                if hasattr(self.env, "get_episode_metrics"):
+                    info["env_metrics"] = self.env.get_episode_metrics()
+            except Exception:
+                pass  # never crash training for stats
+
             self._t = 0
 
         return obs_vec, reward, terminated, truncated, info

@@ -72,6 +72,14 @@ def _safe_float(x: Any) -> float:
         return float("nan")
 
 
+def _first_not_none(*values: Any) -> Any:
+    """Return the first value that is not None. Unlike ``or``, preserves 0 and 0.0."""
+    for v in values:
+        if v is not None:
+            return v
+    return None
+
+
 def wandb_sanitize(metrics: Dict[str, Any]) -> Dict[str, Any]:
     """Return a WandB-safe copy of metrics.
 
@@ -304,16 +312,80 @@ def extract_metrics(result: Dict[str, Any], iteration: int, prev_total_env_steps
             "agent0/papers_rejected": custom.get("agent0_papers_rejected_mean"),
             "agent0/papers_completed": custom.get("agent0_papers_completed_mean"),
             # paper_stats & effort diagnostics (from PapersMetricsCallback)
-            "env/papers_total_mean": custom.get("papers_total_mean"),
-            "env/papers_active_mean": custom.get("papers_active_mean_mean"),
-            "env/papers_published_count_mean": custom.get("papers_published_count_mean"),
-            "env/papers_rejected_count_mean": custom.get("papers_rejected_count_mean"),
-            "agent/effort_applied_sum_mean": custom.get("agent0_effort_applied_sum_mean"),
-            "agent/effort_invalid_frac_mean": custom.get("agent0_effort_invalid_frac_mean"),
-            "agent/choose_effective_frac_mean": custom.get("agent0_choose_effective_frac_mean"),
-            "agent/active_projects_mean": custom.get("agent0_active_projects_mean_mean"),
+            # New API stack: metrics_logger puts values into env_runners directly
+            # Old API stack: episode.custom_metrics puts values with _mean suffix
+            "env/papers_total": _first_not_none(
+                train_env.get("papers_total"),
+                custom.get("papers_total_mean"),
+            ),
+            "env/papers_active_mean": _first_not_none(
+                train_env.get("papers_active_mean"),
+                custom.get("papers_active_mean_mean"),
+            ),
+            "env/papers_published_count": _first_not_none(
+                train_env.get("papers_published_count"),
+                custom.get("papers_published_count_mean"),
+            ),
+            "env/papers_rejected_count": _first_not_none(
+                train_env.get("papers_rejected_count"),
+                custom.get("papers_rejected_count_mean"),
+            ),
+            "agent/effort_applied_sum": _first_not_none(
+                train_env.get("agent0_effort_applied_sum"),
+                custom.get("agent0_effort_applied_sum_mean"),
+            ),
+            "agent/effort_invalid_frac": _first_not_none(
+                train_env.get("agent0_effort_invalid_frac"),
+                custom.get("agent0_effort_invalid_frac_mean"),
+            ),
+            "agent/choose_effective_frac": _first_not_none(
+                train_env.get("agent0_choose_effective_frac"),
+                custom.get("agent0_choose_effective_frac_mean"),
+            ),
+            "agent/active_projects_mean": _first_not_none(
+                train_env.get("agent0_active_projects_mean"),
+                custom.get("agent0_active_projects_mean_mean"),
+            ),
         }
     )
+
+    # --------------------
+    # Horizon / truncation analysis metrics (from PapersMetricsCallback)
+    # Callback writes keys like "horizon_projects_started_total" etc.
+    # New stack: appear in train_env directly.
+    # Old stack: appear in custom with _mean suffix.
+    # --------------------
+    _HORIZON_KEYS = [
+        "projects_started_total",
+        "projects_due_total",
+        "projects_evaluated_total",
+        "projects_published_total",
+        "projects_rejected_total",
+        "projects_due_within_episode_count",
+        "due_within_episode_rate",
+        "started_start_time_mean",
+        "started_start_time_p95",
+        "started_start_time_max",
+        "started_time_window_mean",
+        "started_time_window_p95",
+        "started_time_window_max",
+        "projects_open_end",
+        "open_time_to_deadline_mean",
+        "open_time_to_deadline_min",
+        "open_time_to_deadline_p95",
+        "open_time_to_deadline_max",
+        "n_time_window_clipped",
+        "clipped_rate",
+        "true_time_window_over_200_max",
+    ]
+    for hk in _HORIZON_KEYS:
+        cb_key = f"horizon_{hk}"
+        val = _first_not_none(
+            train_env.get(cb_key),
+            custom.get(f"{cb_key}_mean"),
+        )
+        if val is not None:
+            metrics[f"horizon/{hk}"] = val
 
     # --------------------
     # Timers & perf
@@ -735,9 +807,9 @@ def main(
     )
 
     config = config.env_runners(
-        rollout_fragment_length=200,
+        rollout_fragment_length="auto",
         # optional, falls verfügbar:
-        # sample_timeout_s=120,
+        sample_timeout_s=300,
     )
 
     # ------------------------------------------------------------------
@@ -779,7 +851,7 @@ def main(
         config = _set_rollout_workers_compat(config, num_workers=1)
         config = config.evaluation(evaluation_num_env_runners=0)
     else:
-        config = _set_rollout_workers_compat(config, num_workers=12)
+        config = _set_rollout_workers_compat(config, num_workers=10)
 
     # Rebuild the PPO algorithm with evaluation enabled
     ppo_with_evaluation = config.build_algo()
@@ -821,9 +893,11 @@ def main(
             has_valid_train = not math.isnan(train_return_val)
 
             status = ""
-            if not math.isnan(metrics.get("ppo/mean_kl", float("nan"))) and metrics["ppo/mean_kl"] > 0.05:
+            _kl = _safe_float(metrics.get("ppo/mean_kl"))
+            _vf = _safe_float(metrics.get("ppo/vf_explained_var"))
+            if not math.isnan(_kl) and _kl > 0.05:
                 status += "⚠ KL high "
-            if not math.isnan(metrics.get("ppo/vf_explained_var", float("nan"))) and metrics["ppo/vf_explained_var"] < 0:
+            if not math.isnan(_vf) and _vf < 0:
                 status += "⚠ critic bad "
             if not has_valid_eval:
                 status += "(no_eval) "
@@ -836,8 +910,8 @@ def main(
                 f"Iter {i:03d} | "
                 f"TrainReturn: {train_return_str} | "
                 f"EvalReturn: {eval_return_str} | "
-                f"KL: {metrics['ppo/mean_kl']:6.4f} | "
-                f"VF_var: {metrics['ppo/vf_explained_var']:7.4f} "
+                f"KL: {_kl:6.4f} | "
+                f"VF_var: {_vf:7.4f} "
                 f"{status}"
             )
 
@@ -1030,7 +1104,7 @@ if __name__ == "__main__":
 
     # Reward knobs
     parser.add_argument("--acceptance-threshold", type=float, default=0.5)
-    parser.add_argument("--reward-function", type=str, default="multiply", choices=["multiply", "evenly", "by_effort"])
+    parser.add_argument("--reward-function", type=str, default="by_effort", choices=["multiply", "evenly", "by_effort"])
 
     # Heuristic thresholds (same as your simulation script)
     parser.add_argument("--prestige-threshold", type=float, default=0.2)
