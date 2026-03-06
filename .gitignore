@@ -22,6 +22,8 @@ results/
 ray_results/
 checkpoints/
 runs/
+models/
+artifacts/
 *.pt
 *.ckpt
 *.pkl
