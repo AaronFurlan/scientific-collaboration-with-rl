@@ -410,7 +410,7 @@ class PeerGroupEnvironment(ParallelEnv):
                         project_idx, peer_group[collaborators]
                     )
                     grouped_collaborators |= set(collaborators)
-            # [NEW][BEGIN] ======
+
             # Agents who wanted to collaborate but couldn't form a clique (no
             # mutual match) should still start a solo project so they are not
             # silently dropped.
@@ -423,7 +423,6 @@ class PeerGroupEnvironment(ParallelEnv):
                         if solo_proj is not None:
                             new_projects.append((solo_proj, [agent_id]))
             return new_projects
-            # [NEW][END] ======
 
     def _start_open_project(
         self, project_idx: int, contributors: List[int]
@@ -660,8 +659,8 @@ class PeerGroupEnvironment(ParallelEnv):
         for agent, action in actions.items():
             idx = self.agent_to_id[agent]
             chosen_project = action["choose_project"]
-
             chose_effectively = False
+
             if (
                 chosen_project > 0
                 and len(self._get_active_projects(idx)) < self.max_projects_per_agent
@@ -739,8 +738,8 @@ class PeerGroupEnvironment(ParallelEnv):
                     # Pass ALL agents who chose this project to _find_project_setting.
                     # That method already handles: (a) collaborative clique-finding for
                     # agents with mutual edges, and (b) solo-project fallback for
-                    # agents without mutual matches.  The previous filter here was
-                    # buggy (used values as indices for np.delete) and would
+                    # agents without mutual matches.  The previous filter here
+                    # (used values as indices for np.delete) would
                     # systematically remove solo agents.
                     self._find_project_setting(
                         choice, collaborator_group, collaborators_intents
@@ -972,9 +971,8 @@ class PeerGroupEnvironment(ParallelEnv):
 
         return observations, self.rewards, terminations, truncations, infos
 
-    # ------------------------------------------------------------------
+
     # Episode-level metrics for horizon / truncation analysis
-    # ------------------------------------------------------------------
     def get_episode_metrics(self) -> Dict[str, Any]:
         """Compute and return episode-level metrics for truncation analysis.
 

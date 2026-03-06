@@ -21,7 +21,7 @@ class MacroActionDecoder:
 
     def __init__(self, n_projects_per_step: int, max_projects_per_agent: int,
                  max_peer_group_size: int):
-        self.CP = int(n_projects_per_step) + 1   # choose_project choices
+        self.CP = int(n_projects_per_step) + 1      # choose_project choices
         self.PE = int(max_projects_per_agent) + 1  # put_effort choices
         self.CB = int(max_peer_group_size)         # collaboration bits
         self.COLLAB_BASE = 1 << self.CB
