@@ -31,11 +31,17 @@ from __future__ import annotations
 
 import argparse
 import math
-import numpy as np
-from typing import Any, Callable, Dict, Optional
-
+import os
+import csv
+import wandb
 import ray
-from ray import tune
+import matplotlib.pyplot as plt
+import numpy as np
+import torch
+
+from typing import Any, Callable, Dict, Optional
+from ray.rllib.algorithms.ppo import PPOConfig
+from lightning.pytorch import seed_everything
 
 from agent_policies import (
     create_mixed_policy_population,
@@ -43,21 +49,11 @@ from agent_policies import (
     do_nothing_policy,
     get_policy_function,
 )
+
 from env.peer_group_environment import PeerGroupEnvironment
 from rllib_single_agent_wrapper import RLLibSingleAgentWrapper
 from callbacks.debug_actions_callback import make_action_info_callback
 from callbacks.papers_metrics_callback import PapersMetricsCallback
-
-import os
-import csv
-import wandb
-
-# Optional plotting support
-try:
-    import matplotlib.pyplot as plt
-    _HAS_MATPLOTLIB = True
-except Exception:
-    _HAS_MATPLOTLIB = False
 
 
 # Helper: safe float conversion
@@ -639,15 +635,14 @@ def main(
     info_intervall: int = 50,
     train_batch_size: int = 32000,
 ):
-    try:
-        from ray.rllib.algorithms.ppo import PPOConfig
-    except Exception as e:
-        raise RuntimeError(
-            "RLlib not importable. Install dependencies like:\n"
-            '  pip install "ray[rllib]" torch\n'
-            "Underlying error:\n"
-            f"{e}"
-        )
+
+    # Seed all RNGs (random, numpy, torch, cuda) for reproducibility
+    seed_everything(seed, workers=True)
+
+    # RL Reproducibility: force deterministic PyTorch operations where possible.
+    torch.use_deterministic_algorithms(True, warn_only=True)
+    torch.backends.cudnn.deterministic = True   # deterministic cuDNN convolutions
+    torch.backends.cudnn.benchmark = False       # disable auto-tuner (non-deterministic)
 
     if framework not in {"torch", "tf2"}:
         raise ValueError('framework must be "torch" or "tf2"')
@@ -769,6 +764,8 @@ def main(
     # 3) Build PPO config
     config = (
         PPOConfig()
+        # RL Reproducibility: seed= makes RLlib offset per-worker seed deterministically
+        .debugging(seed=seed, log_level="WARN")
         .environment(
             env=env_name,
             env_config={
@@ -803,7 +800,6 @@ def main(
                 "fcnet_activation": "tanh",
             },
         )
-        .debugging(log_level="WARN")
     )
 
     config = config.env_runners(
@@ -1030,9 +1026,6 @@ def plot_training_history(history: list, out_dir: str = "results", save_prefix: 
     print(f"Wrote training CSV: {csv_path}")
 
     png_path = None
-    if not _HAS_MATPLOTLIB:
-        print("matplotlib not available; skipping plot generation.")
-        return {"csv": csv_path, "png": png_path}
 
     # Create a single figure with eval_return on left axis and kl/vf_var on right axis
     fig, ax1 = plt.subplots(figsize=(10, 5))

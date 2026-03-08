@@ -47,11 +47,13 @@ class PeerGroupEnvironment(ParallelEnv):
         self.n_projects_per_step: int = n_projects_per_step
         self.max_projects_per_agent: int = max_projects_per_agent
         self.max_agent_age: int = max_agent_age
+        # RL Reproducibility: dedicated RNG instance (re-seeded in reset())
+        self.rng: np.random.Generator = np.random.default_rng()
         self.age_distribution = GaussianMixture(
             weights=[0.5, 0.5],
             mus=[52, self.max_agent_age],
             sds=[52, self.max_agent_age / 4],
-            rng=np.random,
+            rng=self.rng,
         )
         self.reward_function_name = reward_mode
         self.max_rewardless_steps: int = max_rewardless_steps
@@ -125,7 +127,8 @@ class PeerGroupEnvironment(ParallelEnv):
         ]
 
     def _init_project_topic_plane(self, n_gaussians=40) -> None:
-        self.area = Area(xlim=(-1, 1), ylim=(-1, 1))
+        # RL Reproducibility: pass instance rng to Area
+        self.area = Area(xlim=(-1, 1), ylim=(-1, 1), rng=self.rng)
 
         # Add Gaussian areas
         for i in range(n_gaussians):
@@ -160,7 +163,7 @@ class PeerGroupEnvironment(ParallelEnv):
             raise ValueError(f"Peer groups must be even, found {len(self.peer_groups)}")
 
         group_pairs = list(
-            np.random.permutation(
+            self.rng.permutation(
                 np.array(list(enumerate(self.peer_groups)), dtype=object)
             )
         )
@@ -180,8 +183,9 @@ class PeerGroupEnvironment(ParallelEnv):
             try:
                 active_only_group1 = self.active_agents[list(group1 - group2)]
                 active_only_group2 = self.active_agents[list(group2 - group1)]
-                agent_idx1 = np.random.choice(active_only_group1)
-                agent_idx2 = np.random.choice(active_only_group2)
+                # RL Reproducibility: use instance rng for random choice
+                agent_idx1 = self.rng.choice(active_only_group1)
+                agent_idx2 = self.rng.choice(active_only_group2)
 
             except ValueError:
                 print(
@@ -211,18 +215,19 @@ class PeerGroupEnvironment(ParallelEnv):
 
         self.open_projects = deepcopy(self.project_templates) # from copy to deepcopy
         for i, project in enumerate(self.open_projects):
+            # RL Reproducibility: use instance rng for all stochastic project generation
             project["required_effort"] = max(
-                1, int(np.random.gumbel(project["required_effort"], 10))
+                1, int(self.rng.gumbel(project["required_effort"], 10))
             )
             project["prestige"] = np.clip(
-                np.random.normal(project["prestige"], 0.15), 0.1, 1
+                self.rng.normal(project["prestige"], 0.15), 0.1, 1
             )
             project["novelty"] = np.clip(
-                np.random.gumbel(project["novelty"], 0.05), 0.1, 1
+                self.rng.gumbel(project["novelty"], 0.05), 0.1, 1
             )
 
             project["time_window"] = np.ceil(
-                project["required_effort"] * np.random.uniform(0.8, 2)
+                project["required_effort"] * self.rng.uniform(0.8, 2)
             )
             project["current_effort"] = 0
             project["contributors"] = []
@@ -250,9 +255,17 @@ class PeerGroupEnvironment(ParallelEnv):
         self, seed: Optional[int] = None, options: Optional[Dict[str, Any]] = None
     ) -> Tuple[Dict[str, Dict[str, Any]], Dict[str, Dict[str, Any]]]:
         if seed is not None:
-            np.random.seed(seed)
-            Area.seed(seed)
-            Project.seed(seed)
+            # RL Reproducibility: re-create the dedicated RNG from the given seed.
+            # This replaces the old np.random.seed() / Area.seed() / Project.seed() approach
+            self.rng = np.random.default_rng(seed)
+
+        # Re-create age distribution with the (potentially new) rng
+        self.age_distribution = GaussianMixture(
+            weights=[0.5, 0.5],
+            mus=[52, self.max_agent_age],
+            sds=[52, self.max_agent_age / 4],
+            rng=self.rng,
+        )
 
         # Reset state variables
         self.timestep = 0
@@ -343,9 +356,10 @@ class PeerGroupEnvironment(ParallelEnv):
         else:
             p = None
         # high reward is rarer
-        not_choosable_this_time = np.random.choice(
+        # RL Reproducibility: use instance rng for stochastic masking
+        not_choosable_this_time = self.rng.choice(
             list(range(1, len(mask["choose_project"]))),
-            np.random.randint(0, len(mask["choose_project"])),
+            self.rng.integers(0, len(mask["choose_project"])),
             replace=False,
             p=p,
         )
@@ -449,7 +463,7 @@ class PeerGroupEnvironment(ParallelEnv):
         for contributor in contributors:
             self._add_active_project(contributor, new_running_proj["id"])
             self.agent_project_effort[contributor][new_running_proj["id"]] = 0
-        proj_object = Project.from_dict(new_running_proj)
+        proj_object = Project.from_dict(new_running_proj, rng=self.rng)
         proj_object.kene = self._locate_project_in_plane(proj_object)
         proj_object.peer_fit = [
             self._determine_agent_fit(proj_object, agent_i)
@@ -496,7 +510,7 @@ class PeerGroupEnvironment(ParallelEnv):
         if len(all_contributors_projects) > 0:
             probabilities = softmax(probabilities)
             generator_project = self.projects[
-                np.random.choice(all_contributors_projects, p=probabilities)
+                self.rng.choice(all_contributors_projects, p=probabilities)
             ]
             new_kene = generator_project.kene
             new_project.generator_project_id = generator_project.project_id
@@ -521,7 +535,7 @@ class PeerGroupEnvironment(ParallelEnv):
         # no projects
         if len(all_contributors_projects) == 0:
             new_project.citations = []
-            new_kene = new_kene + np.random.normal(0, new_project.novelty / 2, 2)
+            new_kene = new_kene + self.rng.normal(0, new_project.novelty / 2, 2)
             new_kene = np.tanh(new_kene)
             return new_kene
 
@@ -531,11 +545,11 @@ class PeerGroupEnvironment(ParallelEnv):
         # no projects in vicinity
         if len(projects_in_vicinity) == 0:
             new_project.citations = []
-            new_kene = new_kene + np.random.normal(0, new_project.novelty / 2, 2)
+            new_kene = new_kene + self.rng.normal(0, new_project.novelty / 2, 2)
             new_kene = np.tanh(new_kene)
             return new_kene
 
-        n_cited = min(len(projects_in_vicinity), np.random.randint(10, 21))
+        n_cited = min(len(projects_in_vicinity), int(self.rng.integers(10, 21)))
         n_citations_vicinity = np.array(
             [len(self.projects[p].citations) + 1 for p in projects_in_vicinity]
         ).sum()
@@ -549,7 +563,8 @@ class PeerGroupEnvironment(ParallelEnv):
             for p, psv in zip(projects_in_vicinity, societal_value_vicinity_probs)
         ]
         # weighted by n citations?
-        cited_projects = np.random.choice(
+        # RL Reproducibility: use instance rng for citation selection
+        cited_projects = self.rng.choice(
             projects_in_vicinity, n_cited, p=citation_popularity
         )
         m = 0
@@ -557,7 +572,7 @@ class PeerGroupEnvironment(ParallelEnv):
             cited_project = self.projects[cited_project]
             cited_project.cited_by.append(new_project.project_id)
             cited_position = cited_project.kene
-            m += np.random.uniform(0, 0.1)
+            m += self.rng.uniform(0, 0.1)
             new_kene += (new_kene - cited_position) * (1 - m) / 2
         new_project.citations = cited_projects
         new_kene = np.tanh(new_kene)
@@ -763,7 +778,7 @@ class PeerGroupEnvironment(ParallelEnv):
         if len(published_projects) > 1 and self.timestep % 10 == 0:
             # sample up to 1000 projects and take the average distance to their 10 closest neighbors
             if len(self.distances) > 1000:
-                idx = np.random.choice(self.distances.shape[0], 1000, replace=False)
+                idx = self.rng.choice(self.distances.shape[0], 1000, replace=False)
                 distance_sample = self.distances[np.ix_(idx, idx)]
             else:
                 distance_sample = self.distances
@@ -877,7 +892,8 @@ class PeerGroupEnvironment(ParallelEnv):
 
             termination_prob = np.mean([rewardless_prob, age_prob])
             # Stochastic decision
-            terminations[a] = np.random.rand() < termination_prob
+            # RL Reproducibility: use instance rng for stochastic termination
+            terminations[a] = self.rng.random() < termination_prob
 
         self.terminated_agents = self.terminated_agents | np.fromiter(
             terminations.values(), dtype=bool
@@ -895,18 +911,19 @@ class PeerGroupEnvironment(ParallelEnv):
                 group = self.agent_peer_idx[agent_id]
                 agents_activated_in_step.append(self._activate_agent(group))
         # grow active agents
+        # RL Reproducibility: use instance rng for stochastic growth decisions
         if self.growth_rate < 1:
-            if self.timestep % (1 // self.growth_rate) == 0 and np.random.rand() < 0.7:
+            if self.timestep % (1 // self.growth_rate) == 0 and self.rng.random() < 0.7:
                 # TODO: choice weighted by success?
-                group = np.random.choice(range(self.n_groups))
+                group = int(self.rng.integers(0, self.n_groups))
                 agents_activated_in_step.append(self._activate_agent(group))
         else:
             each_step = np.floor(self.growth_rate)
-            for _ in range(each_step):
-                group = np.random.choice(range(self.n_groups))
+            for _ in range(int(each_step)):
+                group = int(self.rng.integers(0, self.n_groups))
                 agents_activated_in_step.append(self._activate_agent(group))
             if self.timestep % (1 // (self.growth_rate - each_step)) == 0:
-                group = np.random.choice(range(self.n_groups))
+                group = int(self.rng.integers(0, self.n_groups))
                 agents_activated_in_step.append(self._activate_agent(group))
 
         # if len(agents_activated_in_step) > 0:

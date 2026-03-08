@@ -309,8 +309,8 @@ def get_policy_function(policy_name: str):
 def create_mixed_policy_population(
     n_agents: int, policy_distribution: Dict[str, float] = None, seed=None
 ) -> List[str]:
-    if seed is not None:
-        np.random.seed(seed)
+    # RL Reproducibility: use a local Generator instead of global np.random
+    rng = np.random.default_rng(seed)
     if policy_distribution is None:
         policy_distribution = {
             "careerist": 1 / 3,
@@ -326,7 +326,7 @@ def create_mixed_policy_population(
         agent_policies.extend([policy_name] * n_policy_agents)
     while len(agent_policies) < n_agents:
         agent_policies.append(list(policy_distribution.keys())[0])
-    np.random.shuffle(agent_policies)
+    rng.shuffle(agent_policies)
     return agent_policies
 
 

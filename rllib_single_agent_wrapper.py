@@ -608,6 +608,11 @@ class RLLibSingleAgentWrapper(gym.Env):
         self._last_observations = observations
         self._t = 0
 
+        # RL Reproducibility: seed wrapper's own action_space so that
+        # fallback sampling (for agents without policies) is deterministic
+        if seed is not None:
+            self.action_space.seed(seed)
+
         # choose controlled agent
         if callable(self._choose_controlled):
             self.current_controlled = self._choose_controlled(observations)

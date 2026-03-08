@@ -35,6 +35,7 @@ import torch
 import ray
 from ray import tune
 from ray.rllib.algorithms.algorithm import Algorithm
+from lightning.pytorch import seed_everything
 
 from agent_policies import (
     create_mixed_policy_population,
@@ -397,6 +398,14 @@ def run_simulation_with_rl_agent(cfg: EvalConfig) -> dict:
         Results dict (also saved to log/<prefix>_summary.json).
     """
     cfg.print_summary()
+
+    # Seed all RNGs (random, numpy, torch, cuda) for reproducibility
+    seed_everything(cfg.seed, workers=True)
+
+    # Reproducibility: force deterministic PyTorch operations where possible
+    torch.use_deterministic_algorithms(True, warn_only=True)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
 
     # ---- 1) Init Ray & register env for checkpoint restoration ----
     ray.init(
