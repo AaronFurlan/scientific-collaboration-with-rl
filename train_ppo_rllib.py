@@ -39,6 +39,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch
 
+from ray import tune
 from typing import Any, Callable, Dict, Optional
 from ray.rllib.algorithms.ppo import PPOConfig
 from lightning.pytorch import seed_everything
@@ -54,6 +55,7 @@ from env.peer_group_environment import PeerGroupEnvironment
 from rllib_single_agent_wrapper import RLLibSingleAgentWrapper
 from callbacks.debug_actions_callback import make_action_info_callback
 from callbacks.papers_metrics_callback import PapersMetricsCallback
+from checkpoint_utils import build_checkpoint_path
 
 
 # Helper: safe float conversion
@@ -634,6 +636,8 @@ def main(
     info_action: bool = False,
     info_intervall: int = 50,
     train_batch_size: int = 32000,
+    # Checkpoint options
+    save_every_n_iters: int = 50,
 ):
 
     # Seed all RNGs (random, numpy, torch, cuda) for reproducibility
@@ -855,7 +859,10 @@ def main(
     history = []
 
     best_eval = float("-inf")
+    best_eval_iter: int = -1
+    best_train_return = float("-inf")
     best_checkpoint_path: Optional[str] = None
+    last_checkpoint_path: Optional[str] = None
 
     prev_total_env_steps = 0
 
@@ -922,28 +929,85 @@ def main(
             }
             history.append(history_entry)
 
-            # uses best_eval to decide whether to save a checkpoint,
-            # but logs the actual eval return (which may be NaN) for transparency
+            # ------------------------------------------------------------------
+            # Track best train return (informational only, NOT used for checkpointing)
+            # ------------------------------------------------------------------
+            if has_valid_train and train_return_val > best_train_return:
+                best_train_return = train_return_val
+
+            # ------------------------------------------------------------------
+            # Best-eval checkpoint: save only when a valid eval improves on the best
+            # ------------------------------------------------------------------
             if has_valid_eval and eval_return_val > best_eval:
+                best_eval = eval_return_val
+                best_eval_iter = i
                 try:
-                    chkpt = ppo_with_evaluation.save()
-                    best_checkpoint_path = resolve_checkpoint_path(chkpt)
+                    chkpt_dir = build_checkpoint_path(
+                        policy_config_name=policy_config_name,
+                        reward_function=reward_function,
+                        iteration=i,
+                        max_rewardless_steps=max_rewardless_steps,
+                        eval_return=eval_return_val,
+                        tag="best",
+                    )
+                    os.makedirs(chkpt_dir, exist_ok=True)
+                    ppo_with_evaluation.save_checkpoint(chkpt_dir)
+                    best_checkpoint_path = chkpt_dir
+                    print(
+                        f"[checkpoint] new best eval return {eval_return_val:.4f} "
+                        f"at iter {i} -> {best_checkpoint_path}"
+                    )
                 except Exception as e:
-                    print(f"Could not save checkpoint at iter {i}: {e}")
+                    print(f"[checkpoint] ERROR: could not save best checkpoint at iter {i}: {e}")
 
+                # WandB artifact for new best model
                 if use_wandb and best_checkpoint_path is not None:
-                    artifact = wandb.Artifact(name=f"ppo-best-{policy_config_name}-s{seed}", type="model")
+                    try:
+                        artifact = wandb.Artifact(
+                            name=f"ppo-best-{policy_config_name}-s{seed}",
+                            type="model",
+                        )
+                        if os.path.isdir(best_checkpoint_path):
+                            artifact.add_dir(best_checkpoint_path)
+                        elif os.path.isfile(best_checkpoint_path):
+                            artifact.add_file(best_checkpoint_path)
+                        else:
+                            print(f"[checkpoint] WARNING: best checkpoint path not found: {best_checkpoint_path}")
+                        wandb.log_artifact(artifact)
+                    except Exception as e:
+                        print(f"[checkpoint] WARNING: wandb artifact logging failed at iter {i}: {e}")
+            elif not has_valid_eval:
+                # No evaluation was run this iteration (expected for non-eval iterations)
+                if (i + 1) % 5 == 0:
+                    # Only warn when evaluation *should* have happened
+                    print(f"[checkpoint] no valid eval at iter {i} (eval expected but missing/NaN)")
+            # else: valid eval, but not a new best – nothing to do
 
-                    if os.path.isdir(best_checkpoint_path):
-                        artifact.add_dir(best_checkpoint_path)
-                    elif os.path.isfile(best_checkpoint_path):
-                        artifact.add_file(best_checkpoint_path)
-                    else:
-                        print(f"Checkpoint path not found: {best_checkpoint_path}")
+            # ------------------------------------------------------------------
+            # Periodic checkpoint: save every N iterations regardless of eval
+            # ------------------------------------------------------------------
+            if save_every_n_iters > 0 and (i + 1) % save_every_n_iters == 0:
+                try:
+                    chkpt_dir = build_checkpoint_path(
+                        policy_config_name=policy_config_name,
+                        reward_function=reward_function,
+                        iteration=i,
+                        max_rewardless_steps=max_rewardless_steps,
+                        eval_return=eval_return_val if has_valid_eval else None,
+                        tag="periodic",
+                    )
+                    os.makedirs(chkpt_dir, exist_ok=True)
+                    ppo_with_evaluation.save_checkpoint(chkpt_dir)
+                    last_checkpoint_path = chkpt_dir
+                    print(
+                        f"[checkpoint] periodic save at iter {i} -> {last_checkpoint_path}"
+                    )
+                except Exception as e:
+                    print(f"[checkpoint] ERROR: periodic save failed at iter {i}: {e}")
 
-                    wandb.log_artifact(artifact)
-
-            # wandb logging (driver-only): whole metrics dict, stable global step, and error handling
+            # ------------------------------------------------------------------
+            # WandB logging (driver-only)
+            # ------------------------------------------------------------------
             if use_wandb:
                 try:
                     # Stable step: prefer timesteps_total/env steps, else fallback to iteration index
@@ -966,20 +1030,41 @@ def main(
                     print(f"wandb.log failed at iter {i}: {e}")
 
     finally:
+        # ------------------------------------------------------------------
+        # Training summary
+        # ------------------------------------------------------------------
+        print("\n" + "=" * 60)
+        print("TRAINING SUMMARY")
+        print("=" * 60)
+        if best_eval_iter >= 0:
+            print(f"  Best eval return:      {best_eval:.4f}")
+            print(f"  Best eval iteration:   {best_eval_iter}")
+            print(f"  Best checkpoint path:  {best_checkpoint_path}")
+        else:
+            print("  No valid evaluation checkpoint was saved.")
+        if not math.isinf(best_train_return) and best_train_return > float("-inf"):
+            print(f"  Best train return:     {best_train_return:.4f} (informational only)")
+        if last_checkpoint_path:
+            print(f"  Last periodic checkpoint: {last_checkpoint_path}")
+        print("=" * 60 + "\n")
+
         ppo_with_evaluation.stop()
         ray.shutdown()
 
-        # Upload best checkpoint as artifact if available
+        # Upload best checkpoint as artifact if available (final, deduplicated)
         if use_wandb and best_checkpoint_path is not None:
             try:
                 artifact = wandb.Artifact(
                     name=f"ppo-best-{policy_config_name}-s{seed}",
                     type="model",
                 )
-                artifact.add_dir(best_checkpoint_path)
+                if os.path.isdir(best_checkpoint_path):
+                    artifact.add_dir(best_checkpoint_path)
+                elif os.path.isfile(best_checkpoint_path):
+                    artifact.add_file(best_checkpoint_path)
                 wandb.log_artifact(artifact)
             except Exception as e:
-                print(f"Failed to log best checkpoint artifact to wandb: {e}")
+                print(f"[checkpoint] WARNING: final wandb artifact upload failed: {e}")
 
         if use_wandb and wandb_run is not None:
             try:
@@ -1136,6 +1221,9 @@ if __name__ == "__main__":
     parser.add_argument("--train-batch-size", type=int, default=32000,
                         help="Number of env steps collected per training iteration.")
 
+    parser.add_argument("--save-every-n-iters", type=int, default=50,
+                        help="Save a periodic checkpoint every N iterations (0 = disabled).")
+
     args = parser.parse_args()
 
     main(
@@ -1166,4 +1254,5 @@ if __name__ == "__main__":
         info_action=args.info_action,
         info_intervall=args.info_intervall,
         train_batch_size=args.train_batch_size,
+        save_every_n_iters=args.save_every_n_iters,
     )
