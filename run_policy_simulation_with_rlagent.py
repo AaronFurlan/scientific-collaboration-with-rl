@@ -648,7 +648,7 @@ def parse_args() -> EvalConfig:
 
     # Env knobs (defaults match train_ppo_rllib.py)
     parser.add_argument("--n-agents", type=int, default=64)
-    parser.add_argument("--start-agents", type=int, default=60)
+    parser.add_argument("--start-agents", type=int, default=30)
     parser.add_argument("--max-steps", type=int, default=500)
     parser.add_argument("--max-rewardless-steps", type=int, default=500)
     parser.add_argument("--n-groups", type=int, default=8)
