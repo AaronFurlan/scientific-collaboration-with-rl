@@ -11,7 +11,7 @@ def build_reward_dataframe(reward_steps, agents, seed):
     for a in agents:
         for k, v in a.items():
             if v is not None:
-                agent_archetype[k] = v.get("archetype", "RL_Agent")
+                agent_archetype[k] = v.get("archetype", "rl_agent")
 
     records = []
     for step_idx, step in enumerate(reward_steps):
@@ -47,7 +47,7 @@ def build_reward_summary_by_archetype(reward_steps, agents, seed, strategy):
                 continue
             if isinstance(v, dict):
                 # Heuristic agents have 'archetype', our controlled RL agent might not
-                agent_archetype[agent_id] = v.get("archetype", "RL_Agent")
+                agent_archetype[agent_id] = v.get("archetype", "rl_agent")
 
     if not agent_archetype:
         raise ValueError("No archetypes found in agents data.")
