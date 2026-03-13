@@ -100,7 +100,7 @@ class EvalConfig:
     group_policy_homogenous: bool = False
 
     # Wrapper  [must-match-training]
-    topk_collab: int = 3
+    topk_collab: Optional[int] = None
     topk_apply_to_all_agents: bool = True
 
     # RL agent
@@ -116,6 +116,16 @@ class EvalConfig:
     @property
     def policy_distribution(self) -> Dict[str, float]:
         return POLICY_CONFIGS[self.policy_config_name]
+
+    def copy_with(self, **kwargs) -> EvalConfig:
+        """Create a copy of this config with some fields updated."""
+        from copy import deepcopy
+        new_cfg = deepcopy(self)
+        for k, v in kwargs.items():
+            if not hasattr(new_cfg, k):
+                raise AttributeError(f"EvalConfig has no attribute {k}")
+            setattr(new_cfg, k, v)
+        return new_cfg
 
     def print_summary(self) -> None:
         """Print a compact config summary at startup."""
@@ -680,6 +690,30 @@ def parse_args() -> EvalConfig:
         "--output-prefix", type=str, default="rl_agent_sim",
         help="Prefix for log output files",
     )
+    
+    # Top-k Collaboration
+    parser.add_argument(
+        "--topk", type=int, default=None,
+        help="If set, restricts collaboration to top-k partners per step (default: None)",
+    )
+    parser.add_argument(
+        "--topk-all-agents", action="store_true", default=True,
+        help="If set, applies top-k also to heuristic agents (default: True)",
+    )
+    parser.add_argument(
+        "--no-topk-all-agents", action="store_false", dest="topk_all_agents",
+        help="If set, applies top-k ONLY to the controlled RL agent",
+    )
+    
+    # Automation
+    parser.add_argument(
+        "--num-seeds", type=int, default=10,
+        help="Number of consecutive seeds to evaluate (default: 10)",
+    )
+    parser.add_argument(
+        "--all-rewards", action="store_true",
+        help="If set, evaluates for all reward functions ('multiply', 'evenly', 'by_effort')",
+    )
 
     args = parser.parse_args()
 
@@ -701,14 +735,41 @@ def parse_args() -> EvalConfig:
         effort_threshold=args.effort_threshold,
         policy_config_name=args.policy_config,
         group_policy_homogenous=args.group_policy_homogenous,
+        topk_collab=args.topk,
+        topk_apply_to_all_agents=args.topk_all_agents,
         controlled_agent_id=args.controlled_agent_id,
         deterministic=not args.stochastic,
         seed=args.seed,
         output_file_prefix=args.output_prefix,
-    )
+    ), args.num_seeds, args.all_rewards
 
 
 if __name__ == "__main__":
-    config = parse_args()
-    run_simulation_with_rl_agent(config)
+    base_config, num_seeds, all_rewards = parse_args()
+
+    reward_functions = (
+        ["multiply", "evenly", "by_effort"] if all_rewards else [base_config.reward_function]
+    )
+
+    start_seed = base_config.seed
+
+    for reward_fn in reward_functions:
+        print(f"\n{'='*60}")
+        print(f"STARTING EVALUATION FOR REWARD FUNCTION: {reward_fn}")
+        print(f"{'='*60}\n")
+        
+        for i in range(num_seeds):
+            current_seed = start_seed + i
+            
+            # Create a copy of the config for this specific run
+            config = base_config.copy_with(
+                reward_function=reward_fn,
+                seed=current_seed,
+                output_file_prefix=f"rl_ppo_{reward_fn}_s{current_seed}"
+            )
+            
+            print(f"\n--- Run {i+1}/{num_seeds} | Seed: {current_seed} | Reward: {reward_fn} ---")
+            run_simulation_with_rl_agent(config)
+
+    print("\n✅ Evaluation batch completed.")
 
