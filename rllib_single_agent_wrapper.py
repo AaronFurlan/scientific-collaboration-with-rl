@@ -318,16 +318,18 @@ class RLLibSingleAgentWrapper(gym.Env):
     # Top-k collaboration helpers
     # -----------------------------
 
-    def _extract_peer_feature_array(self, obs: Any, candidate_keys: Iterable[str], length: int, default_value: float = 0.0) -> np.ndarray:
+    def _extract_peer_feature_array(self, obs: Any, candidate_keys: Iterable[str], length: int, default_value: Any = 0.0) -> Optional[np.ndarray]:
         """Search nested obs dict for a 1D array under any of candidate_keys.
 
         The observation structure may change; we try a flexible search:
         - Direct dict lookup by key
         - One-level nested dict lookup
         If not found, return a constant array of default_value.
+        If default_value is None, return None if not found.
         The result is always float32 length `length`, padded/clipped as needed.
         """
         if not isinstance(obs, dict):
+            if default_value is None: return None
             return np.full((length,), float(default_value), dtype=np.float32)
 
         found = None
@@ -350,11 +352,17 @@ class RLLibSingleAgentWrapper(gym.Env):
                     break
 
         if found is None:
+            if default_value is None: return None
             return np.full((length,), float(default_value), dtype=np.float32)
 
         arr = np.asarray(found, dtype=np.float32).ravel()
         if arr.size < length:
-            pad = np.full((length - arr.size,), float(default_value), dtype=np.float32)
+            if default_value is None:
+                # If we need a specific length but only found a shorter array, 
+                # we pad with 0.0 even if default_value is None, to avoid partial failure.
+                pad = np.zeros((length - arr.size,), dtype=np.float32)
+            else:
+                pad = np.full((length - arr.size,), float(default_value), dtype=np.float32)
             arr = np.concatenate([arr, pad])
         elif arr.size > length:
             arr = arr[:length]
@@ -444,8 +452,20 @@ class RLLibSingleAgentWrapper(gym.Env):
         rep = self._extract_peer_feature_array(obs, rep_keys, self._CB, default_value=0.0)
 
         # Distance features (smaller is better)
+        # We try to find precomputed distances or compute them from centroids
         dist_keys = ["peer_distance", "peer_distances", "distance_to_peers", "peers_distance"]
-        dist = self._extract_peer_feature_array(obs, dist_keys, self._CB, default_value=0.0)
+        dist = self._extract_peer_feature_array(obs, dist_keys, self._CB, default_value=None)
+
+        if dist is None:
+            # Fallback: compute Euclidean distance from centroids if available
+            p_centroids = self._extract_peer_feature_array(obs, ["peer_centroids"], self._CB * 2, default_value=0.0)
+            s_centroid = self._extract_peer_feature_array(obs, ["self_centroid", "self_centroids"], 2, default_value=0.0)
+            
+            p_centroids = p_centroids.reshape(self._CB, 2)
+            s_centroid = s_centroid.reshape(1, 2)
+            
+            # Distance: sqrt(sum((p - s)^2))
+            dist = np.sqrt(np.sum((p_centroids - s_centroid)**2, axis=1)).astype(np.float32)
 
         # Same-group bonus
         own_gid = self._extract_agent_group_id(obs)

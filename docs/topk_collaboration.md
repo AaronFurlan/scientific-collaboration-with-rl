@@ -26,7 +26,8 @@ Score = (w_rep * Norm_Reputation) - (w_dist * Norm_Distance) + (w_same * SameGro
 ```
 Where:
 *   `Norm_Reputation` and `Norm_Distance` are min-max normalized values (0 to 1) across the current group.
-*   `SameGroup` is 1 if in the same group, 0 otherwise.
+*   `Distance` is calculated as the Euclidean distance between the agent's `self_centroid` and the peer's `peer_centroids` (observable features).
+*   `SameGroup` is 1 if in the same group, 0 otherwise. (Note: Currently, group IDs are not explicitly part of the observation, so this bonus defaults to 0 unless the environment is extended).
 
 **Default Weights:**
 *   `w_rep` (Reputation): 1.0
