@@ -42,11 +42,13 @@ Where:
 
 ## Configuration via CLI
 
-In `run_policy_simulation_with_rlagent.py`, the mechanism can be controlled using the following arguments:
+The mechanism can be controlled in both simulation (`run_policy_simulation_with_rlagent.py`) and training (`train_ppo_rllib.py`) using the following arguments:
 
-*   `--topk <n>`: Sets the value for `k`. If not provided (or `None`), the restriction is disabled.
-*   `--topk-all-agents`: Applies the `k` limit to **all** agents in the environment (RL and heuristics). This is the default behavior if `--topk` is used.
-*   `--no-topk-all-agents`: Applies the `k` limit **only** to the controlled RL agent. Heuristic agents will not be pruned by the wrapper.
+*   `--topk <n>`: Sets the value for `k`. If not provided (or `None`), the restriction is disabled by default.
+*   `--topk-all-agents`: Applies the `k` limit to **all** agents in the environment (RL and heuristics).
+    *   **In Simulation**: This is `True` by default when `--topk` is used.
+    *   **In Training**: This is `False` by default (heuristic agents are not restricted unless explicitly requested).
+*   `--no-topk-all-agents`: Explicitly applies the `k` limit **only** to the controlled RL agent. Heuristic agents will not be pruned by the wrapper.
 
 ## Purpose in Research
 This mechanism allows researchers to study how agent policies adapt when they cannot collaborate with everyone they want. It forces the RL agent to learn to prioritize "high-value" collaborators based on the observable features (reputation, distance) rather than just choosing everyone available.

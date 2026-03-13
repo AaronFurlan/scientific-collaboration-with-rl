@@ -500,6 +500,9 @@ def make_env_creator(
     effort_threshold: int,
     # Which agent PPO controls
     controlled_agent_id: str,
+    # Top-k ablation options
+    topk_collab: Optional[int] = None,
+    topk_apply_to_all_agents: bool = False,
 ) -> Callable[[Optional[Dict[str, Any]]], Any]:
     """
     Returns an RLlib-compatible env creator: f(env_config) -> gymnasium.Env
@@ -593,8 +596,8 @@ def make_env_creator(
             controlled_agent=controlled_agent_id,
             other_policies=other_policies,
             force_episode_horizon=max_steps,
-            topk_collab=3,
-            topk_apply_to_all_agents=True,
+            topk_collab=env_config.get("topk_collab", topk_collab),
+            topk_apply_to_all_agents=env_config.get("topk_apply_to_all_agents", topk_apply_to_all_agents),
         )
 
         return wrapper
@@ -627,6 +630,9 @@ def main(
     effort_threshold: int,
     # Controlled agent
     controlled_agent_id: str,
+    # Top-k ablation options
+    topk_collab: Optional[int] = None,
+    topk_apply_to_all_agents: bool = False,
     # Wandb options
     wandb_project: str | None = None,
     wandb_entity: str | None = None,
@@ -708,6 +714,8 @@ def main(
                     "prestige_threshold": prestige_threshold,
                     "novelty_threshold": novelty_threshold,
                     "effort_threshold": effort_threshold,
+                    "topk_collab": topk_collab,
+                    "topk_apply_to_all_agents": topk_apply_to_all_agents,
                 },
             }
 
@@ -762,6 +770,8 @@ def main(
         novelty_threshold=novelty_threshold,
         effort_threshold=effort_threshold,
         controlled_agent_id=controlled_agent_id,
+        topk_collab=topk_collab,
+        topk_apply_to_all_agents=topk_apply_to_all_agents,
     )
     tune.register_env(env_name, env_creator)
 
@@ -1192,6 +1202,20 @@ if __name__ == "__main__":
     # Controlled agent
     parser.add_argument("--controlled-agent-id", type=str, default="agent_0")
 
+    # Top-k Collaboration ablation
+    parser.add_argument(
+        "--topk", type=int, default=None,
+        help="If set, restricts collaboration to top-k partners per step (default: None)",
+    )
+    parser.add_argument(
+        "--topk-all-agents", action="store_true", default=False,
+        help="If set, applies top-k also to heuristic agents (default: False)",
+    )
+    parser.add_argument(
+        "--no-topk-all-agents", action="store_false", dest="topk_all_agents",
+        help="If set, applies top-k ONLY to the controlled RL agent",
+    )
+
     # Wandb options
     parser.add_argument("--wandb-project", type=str, default="RL in the Game of Science")
     parser.add_argument("--wandb-entity", type=str, default="rl_in_the_game_of_science")
@@ -1247,6 +1271,8 @@ if __name__ == "__main__":
         novelty_threshold=args.novelty_threshold,
         effort_threshold=args.effort_threshold,
         controlled_agent_id=args.controlled_agent_id,
+        topk_collab=args.topk,
+        topk_apply_to_all_agents=args.topk_all_agents,
         wandb_project=args.wandb_project,
         wandb_entity=args.wandb_entity,
         wandb_group=args.wandb_group,
