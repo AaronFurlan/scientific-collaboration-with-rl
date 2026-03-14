@@ -26,7 +26,7 @@ RLlib models usually require flat tensors as input. The wrapper takes the rich, 
 
 #### Top-K Collaboration Mechanism
 
-To keep the action space manageable and simulate more realistic scenarios, a `topk_collab` restriction can be activated.
+To keep the action space manageable, a `topk_collab` restriction can be activated.
 If an agent selects more than $K$ partners, the wrapper filters the selection based on a score composed of:
 *   **Reputation** of the partner.
 *   **Thematic Distance** (based on the centroid in the topic space).
