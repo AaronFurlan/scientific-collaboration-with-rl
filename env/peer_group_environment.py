@@ -124,6 +124,24 @@ class PeerGroupEnvironment(ParallelEnv):
                 "prestige": 0.5,
                 "novelty": 0.2,
             },
+            # high novelty, low effort, high prestige (rare)
+            {
+                "required_effort": 15,
+                "prestige": 0.8,
+                "novelty": 0.8,
+            },
+            # low novelty, high effort, low prestige
+            {
+                "required_effort": 50,
+                "prestige": 0.3,
+                "novelty": 0.1,
+            },
+            # high novelty, high effort, high prestige
+            {
+                "required_effort": 100,
+                "prestige": 0.9,
+                "novelty": 0.9,
+            },
         ]
 
     def _init_project_topic_plane(self, n_gaussians=40) -> None:
@@ -209,12 +227,10 @@ class PeerGroupEnvironment(ParallelEnv):
         return None
 
     def _generate_projects(self) -> None:
+        self.open_projects = []
+        for i in range(self.n_projects_per_step):
+            project = self.rng.choice(self.project_templates).copy()
 
-        # DEBUG: check if templates drift
-        # print("TEMPLATE required_effort:", [p["required_effort"] for p in self.project_templates[:3]])
-
-        self.open_projects = deepcopy(self.project_templates) # from copy to deepcopy
-        for i, project in enumerate(self.open_projects):
             # RL Reproducibility: use instance rng for all stochastic project generation
             project["required_effort"] = max(
                 1, int(self.rng.gumbel(project["required_effort"], 10))
@@ -233,6 +249,8 @@ class PeerGroupEnvironment(ParallelEnv):
             project["contributors"] = []
             project["start_time"] = 0
             project["finished"] = False
+
+            self.open_projects.append(project)
 
     def _get_active_projects(self, agent: int) -> List[str]:
         return [p for p in self.agent_active_projects[agent] if p is not None]
@@ -367,10 +385,14 @@ class PeerGroupEnvironment(ParallelEnv):
         # Peer collaboration: MultiBinary for peer group
         peer_group = self.peer_groups[self.agent_peer_idx[idx]]
         mask["collaborate_with"] = np.zeros(self.max_peer_group_size, dtype=np.int8)
-        mask["collaborate_with"][: len(peer_group)] = np.where(
-            self.active_agents[peer_group].astype(bool),
+        
+        # Limit to max_peer_group_size if necessary
+        effective_peer_group = peer_group[:self.max_peer_group_size]
+        
+        mask["collaborate_with"][: len(effective_peer_group)] = np.where(
+            self.active_agents[effective_peer_group].astype(bool),
             2,  ## if active unmask
-            mask["collaborate_with"][: len(peer_group)],  # else keep 0
+            mask["collaborate_with"][: len(effective_peer_group)],  # else keep 0
         )
         if sum(mask["collaborate_with"]) == 0:
             breakpoint()
@@ -925,6 +947,9 @@ class PeerGroupEnvironment(ParallelEnv):
             if self.timestep % (1 // (self.growth_rate - each_step)) == 0:
                 group = int(self.rng.integers(0, self.n_groups))
                 agents_activated_in_step.append(self._activate_agent(group))
+
+        # regenerate open projects
+        self._generate_projects()
 
         # if len(agents_activated_in_step) > 0:
         #     print(
