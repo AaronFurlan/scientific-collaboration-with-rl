@@ -42,6 +42,7 @@ import torch
 from ray import tune
 from typing import Any, Callable, Dict, Optional
 from ray.rllib.algorithms.ppo import PPOConfig
+from ray.rllib.algorithms.appo import APPOConfig
 from lightning.pytorch import seed_everything
 
 from agent_policies import (
@@ -246,7 +247,7 @@ def extract_metrics(result: Dict[str, Any], iteration: int, prev_total_env_steps
     )
 
     # --------------------
-    # PPO learner internals
+    # Learner internals (PPO, APPO, etc.)
     # --------------------
     learner = result.get("learners", {}).get("default_policy", {}) or {}
     mean_kl = learner.get("mean_kl_loss")
@@ -266,14 +267,17 @@ def extract_metrics(result: Dict[str, Any], iteration: int, prev_total_env_steps
 
     metrics.update(
         {
+            "algo/mean_kl": mean_kl,
+            "algo/entropy": entropy,
+            "algo/policy_loss": policy_loss,
+            "algo/value_loss": value_loss,
+            "algo/vf_explained_var": vf_explained_var,
+            "algo/lr": lr,
+            "algo/gradients_default_optimizer_global_norm": grad_global_norm,
+            "algo/curr_kl_coeff": curr_kl_coeff,
+            # Legacy/compatible keys
             "ppo/mean_kl": mean_kl,
-            "ppo/entropy": entropy,
-            "ppo/policy_loss": policy_loss,
-            "ppo/value_loss": value_loss,
             "ppo/vf_explained_var": vf_explained_var,
-            "ppo/lr": lr,
-            "ppo/gradients_default_optimizer_global_norm": grad_global_norm,
-            "ppo/curr_kl_coeff": curr_kl_coeff,
         }
     )
 
@@ -607,6 +611,7 @@ def make_env_creator(
 
 def main(
     *,
+    algo: str = "PPO",
     iterations: int,
     framework: str,
     policy_config_name: str,
@@ -690,7 +695,7 @@ def main(
         if wandb_mode != "disabled":
             # Build a flat config dict for wandb
             wandb_config: Dict[str, Any] = {
-                "algo": "PPO",
+                "algo": algo,
                 "framework": framework,
                 "iterations": iterations,
                 "seed": seed,
@@ -775,46 +780,90 @@ def main(
     )
     tune.register_env(env_name, env_creator)
 
-    # 3) Build PPO config
-    config = (
-        PPOConfig()
-        # RL Reproducibility: seed= makes RLlib offset per-worker seed deterministically
-        .debugging(seed=seed, log_level="WARN")
-        .environment(
-            env=env_name,
-            env_config={
-                "n_agents": n_agents,
-                "start_agents": start_agents,
-                "max_steps": max_steps,
-                "max_rewardless_steps": max_rewardless_steps,
-                "n_groups": n_groups,
-                "max_peer_group_size": max_peer_group_size,
-                "n_projects_per_step": n_projects_per_step,
-                "max_projects_per_agent": max_projects_per_agent,
-                "max_agent_age": max_agent_age,
-                "acceptance_threshold": acceptance_threshold,
-                "reward_function": reward_function,
-            },
+    # 3) Build config
+    if algo.upper() == "PPO":
+        config = (
+            PPOConfig()
+            .api_stack(
+                enable_rl_module_and_learner=False,
+                enable_env_runner_and_connector_v2=False,
+            )
+            # RL Reproducibility: seed= macht RLlib's per-worker seed deterministisch
+            .debugging(seed=seed, log_level="WARN")
+            .environment(
+                env=env_name,
+                env_config={
+                    "n_agents": n_agents,
+                    "start_agents": start_agents,
+                    "max_steps": max_steps,
+                    "max_rewardless_steps": max_rewardless_steps,
+                    "n_groups": n_groups,
+                    "max_peer_group_size": max_peer_group_size,
+                    "n_projects_per_step": n_projects_per_step,
+                    "max_projects_per_agent": max_projects_per_agent,
+                    "max_agent_age": max_agent_age,
+                    "acceptance_threshold": acceptance_threshold,
+                    "reward_function": reward_function,
+                },
+            )
+            .framework(framework)
+            .training(
+                train_batch_size=train_batch_size,
+                gamma=0.99,
+                lambda_=0.95,
+                minibatch_size=min(512, train_batch_size),
+                num_epochs=8,
+                lr=1e-4,
+                grad_clip=0.5,
+                entropy_coeff=0.01,
+                vf_loss_coeff=1.0,
+                vf_clip_param=5.0,
+                model={
+                    "fcnet_hiddens": [256, 256],
+                    "fcnet_activation": "tanh",
+                },
+            )
         )
-        .framework(framework)
-        # Keep small for debugging; increase later
-        .training(
-            train_batch_size=train_batch_size, #32000
-            gamma=0.99,
-            lambda_=0.95,
-            minibatch_size=min(512, train_batch_size),  # can't exceed train_batch_size
-            num_epochs=8,
-            lr=1e-4,
-            grad_clip=0.5,
-            entropy_coeff=0.01,
-            vf_loss_coeff=1.0,
-            vf_clip_param=5.0,
-            model={
-                "fcnet_hiddens": [256, 256],
-                "fcnet_activation": "tanh",
-            },
+    elif algo.upper() == "APPO":
+        config = (
+            APPOConfig()
+            .api_stack(
+                enable_rl_module_and_learner=False,
+                enable_env_runner_and_connector_v2=False,
+            )
+            .debugging(seed=seed, log_level="WARN")
+            .environment(
+                env=env_name,
+                env_config={
+                    "n_agents": n_agents,
+                    "start_agents": start_agents,
+                    "max_steps": max_steps,
+                    "max_rewardless_steps": max_rewardless_steps,
+                    "n_groups": n_groups,
+                    "max_peer_group_size": max_peer_group_size,
+                    "n_projects_per_step": n_projects_per_step,
+                    "max_projects_per_agent": max_projects_per_agent,
+                    "max_agent_age": max_agent_age,
+                    "acceptance_threshold": acceptance_threshold,
+                    "reward_function": reward_function,
+                },
+            )
+            .framework(framework)
+            .training(
+                train_batch_size=train_batch_size,
+                gamma=0.99,
+                lr=1e-4,
+                grad_clip=0.5,
+                entropy_coeff=0.01,
+                vf_loss_coeff=1.0,
+                model={
+                    "fcnet_hiddens": [256, 256],
+                    "fcnet_activation": "tanh",
+                },
+            )
         )
-    )
+    else:
+        raise ValueError(f"Unsupported algorithm: {algo}")
 
     config = config.env_runners(
         rollout_fragment_length="auto",
@@ -863,8 +912,8 @@ def main(
     else:
         config = _set_rollout_workers_compat(config, num_workers=10)
 
-    # Rebuild the PPO algorithm with evaluation enabled
-    ppo_with_evaluation = config.build_algo()
+    # Rebuild the algorithm with evaluation enabled
+    algo_instance = config.build_algo()
 
     history = []
 
@@ -877,7 +926,7 @@ def main(
     prev_total_env_steps = 0
 
     try:
-        print("\n=== PPO TRAINING (single controlled agent) with evaluation ===")
+        print(f"\n=== {algo.upper()} TRAINING (single controlled agent) with evaluation ===")
         print(f"controlled_agent_id: {controlled_agent_id}")
         print(f"policy_config: {policy_config_name}  (group_policy_homogenous={group_policy_homogenous})")
         print(f"env: n_agents={n_agents}, start_agents={start_agents}, max_steps={max_steps}, "
@@ -886,7 +935,7 @@ def main(
         print(f"reward_function: {reward_function}, acceptance_threshold: {acceptance_threshold}\n")
 
         for i in range(iterations):
-            result = ppo_with_evaluation.train()
+            result = algo_instance.train()
 
             # Metriken extrahieren (uses env_runners-/evaluation-block out of results)
             metrics, global_step = extract_metrics(result, i, prev_total_env_steps)
@@ -906,8 +955,8 @@ def main(
             has_valid_train = not math.isnan(train_return_val)
 
             status = ""
-            _kl = _safe_float(metrics.get("ppo/mean_kl"))
-            _vf = _safe_float(metrics.get("ppo/vf_explained_var"))
+            _kl = _safe_float(metrics.get("ppo/mean_kl") or metrics.get("algo/mean_kl"))
+            _vf = _safe_float(metrics.get("ppo/vf_explained_var") or metrics.get("algo/vf_explained_var"))
             if not math.isnan(_kl) and _kl > 0.05:
                 status += "⚠ KL high "
             if not math.isnan(_vf) and _vf < 0:
@@ -919,20 +968,24 @@ def main(
             eval_return_str = "n/a" if not has_valid_eval else f"{eval_return_val:8.2f}"
             train_return_str = "n/a" if not has_valid_train else f"{train_return_val:8.2f}"
 
-            print(
+            log_line = (
                 f"Iter {i:03d} | "
                 f"TrainReturn: {train_return_str} | "
                 f"EvalReturn: {eval_return_str} | "
-                f"KL: {_kl:6.4f} | "
-                f"VF_var: {_vf:7.4f} "
-                f"{status}"
             )
+            if not math.isnan(_kl):
+                log_line += f"KL: {_kl:6.4f} | "
+            if not math.isnan(_vf):
+                log_line += f"VF_var: {_vf:7.4f} "
+            
+            log_line += f"{status}"
+            print(log_line)
 
             history_entry: Dict[str, Any] = {
                 "iter": i,
                 "eval_return": eval_return_val if has_valid_eval else float("nan"),
-                "kl": metrics["ppo/mean_kl"],
-                "vf_var": metrics["ppo/vf_explained_var"],
+                "kl": _kl,
+                "vf_var": _vf,
                 "episode_reward_mean": raw_train_return,
                 "episode_len_mean": metrics.get("train/episode_len_mean"),
                 "timesteps_total": result.get("timesteps_total"),
@@ -961,7 +1014,7 @@ def main(
                         tag="best",
                     )
                     os.makedirs(chkpt_dir, exist_ok=True)
-                    ppo_with_evaluation.save_checkpoint(chkpt_dir)
+                    algo_instance.save_checkpoint(chkpt_dir)
                     best_checkpoint_path = chkpt_dir
                     print(
                         f"[checkpoint] new best eval return {eval_return_val:.4f} "
@@ -974,7 +1027,7 @@ def main(
                 if use_wandb and best_checkpoint_path is not None:
                     try:
                         artifact = wandb.Artifact(
-                            name=f"ppo-best-{policy_config_name}-s{seed}",
+                            name=f"{algo.lower()}-best-{policy_config_name}-s{seed}",
                             type="model",
                         )
                         if os.path.isdir(best_checkpoint_path):
@@ -1007,7 +1060,7 @@ def main(
                         tag="periodic",
                     )
                     os.makedirs(chkpt_dir, exist_ok=True)
-                    ppo_with_evaluation.save_checkpoint(chkpt_dir)
+                    algo_instance.save_checkpoint(chkpt_dir)
                     last_checkpoint_path = chkpt_dir
                     print(
                         f"[checkpoint] periodic save at iter {i} -> {last_checkpoint_path}"
@@ -1058,14 +1111,14 @@ def main(
             print(f"  Last periodic checkpoint: {last_checkpoint_path}")
         print("=" * 60 + "\n")
 
-        ppo_with_evaluation.stop()
+        algo_instance.stop()
         ray.shutdown()
 
         # Upload best checkpoint as artifact if available (final, deduplicated)
         if use_wandb and best_checkpoint_path is not None:
             try:
                 artifact = wandb.Artifact(
-                    name=f"ppo-best-{policy_config_name}-s{seed}",
+                    name=f"{algo.lower()}-best-{policy_config_name}-s{seed}",
                     type="model",
                 )
                 if os.path.isdir(best_checkpoint_path):
@@ -1083,7 +1136,7 @@ def main(
                 print(f"wandb.finish() failed: {e}")
 
     # Persist training history to CSV and plot (if matplotlib is available)
-    results_paths = plot_training_history(history, save_prefix=f"ppo_history_{policy_config_name}_{seed}")
+    results_paths = plot_training_history(history, save_prefix=f"{algo.lower()}_history_{policy_config_name}_{seed}")
 
     # Optionally log CSV/PNG as artifacts/files in wandb
     if use_wandb and results_paths:
@@ -1153,6 +1206,14 @@ def plot_training_history(history: list, out_dir: str = "results", save_prefix: 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
 
+    parser.add_argument(
+        "--algo",
+        type=str,
+        default="PPO",
+        choices=["PPO", "APPO"],
+        help='RL algorithm to use: "PPO" or "APPO"',
+    )
+
     # RLlib
     parser.add_argument("--iterations", type=int, default=20)
     parser.add_argument(
@@ -1180,18 +1241,18 @@ if __name__ == "__main__":
     parser.add_argument("--seed", type=int, default=42)
 
     # Env knobs (keep small for PPO + macro-action)
-    parser.add_argument("--n-agents", type=int, default=64)
-    parser.add_argument("--start-agents", type=int, default=30)
-    parser.add_argument("--max-steps", type=int, default=500)
+    parser.add_argument("--n-agents", type=int, default=2000)
+    parser.add_argument("--start-agents", type=int, default=200)
+    parser.add_argument("--max-steps", type=int, default=600)
     parser.add_argument("--max-rewardless-steps", type=int, default=500)
-    parser.add_argument("--n-groups", type=int, default=8)
-    parser.add_argument("--max-peer-group-size", type=int, default=8)  # keep small!
+    parser.add_argument("--n-groups", type=int, default=20)
+    parser.add_argument("--max-peer-group-size", type=int, default=13)  # keep small!
     parser.add_argument("--n-projects-per-step", type=int, default=1)
     parser.add_argument("--max-projects-per-agent", type=int, default=6)
     parser.add_argument("--max-agent-age", type=int, default=750)
 
     # Reward knobs
-    parser.add_argument("--acceptance-threshold", type=float, default=0.5)
+    parser.add_argument("--acceptance-threshold", type=float, default=0.44)
     parser.add_argument("--reward-function", type=str, default="by_effort", choices=["multiply", "evenly", "by_effort"])
 
     # Heuristic thresholds (same as your simulation script)
@@ -1251,6 +1312,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     main(
+        algo=args.algo,
         iterations=args.iterations,
         framework=args.framework,
         policy_config_name=args.policy_config,
