@@ -233,7 +233,7 @@ def orthodox_scientist_policy(
 def mass_producer_policy(
     observation: Dict[str, Any],
     action_mask: Dict[str, np.ndarray],
-    effort_threshold: 22,
+    effort_threshold = 22,
     **kwargs,
 ) -> Dict[str, Any]:
 
