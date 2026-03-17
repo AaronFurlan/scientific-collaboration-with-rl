@@ -17,6 +17,8 @@ Runs the simulation for one random seed and three reward functions and saves the
 python run_policy_simulation.py
 ```
 
+
+
 Outputs (written in the repo root and `log/`):
 - `balanced_summary.json`: high-level results (steps, rewards, success rate, policy distribution)
 - `log/balanced_actions.jsonl`: actions taken each step (JSONL)
@@ -65,6 +67,12 @@ Run `visualizations.ipynb`to reproduce the figures.
 ## Tips
 - JSONL logs can be large; use `jq`, `tail -f`, or sample lines.
 - Commit parameter changes alongside their `*_summary.json` for reproducibility.
+
+## Run the Simulation with RL agent (agent_0)
+Runs the simulation with a PPO agent (agent0) and a fixed seed.
+```bash
+python train_ppo_rllib.py
+```
 
 ## Overleaf workflow
 - After writing in Overleaf pull the latest version from Overleaf with `git subtree pull --prefix thesis overleaf OVERLEAF_BRANCH --squash`

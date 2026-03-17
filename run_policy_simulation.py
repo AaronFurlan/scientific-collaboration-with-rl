@@ -175,7 +175,7 @@ def run_simulation_with_policies(
         stats.update(env, observations, rewards, terminations, truncations)
 
         # Print progress
-        if step % 100 == 0:
+        if step % 10 == 0:
             print(f"Step {step}: {stats.summary_line()}")
 
         # Check if all agents are done
@@ -286,7 +286,7 @@ if __name__ == "__main__":
     run_simulation_with_policies(
         n_agents=2000,
         start_agents=200,
-        max_steps=600,
+        max_steps=100,
         n_groups=20,
         max_peer_group_size=100,
         max_rewardless_steps=50,

@@ -47,11 +47,13 @@ class PeerGroupEnvironment(ParallelEnv):
         self.n_projects_per_step: int = n_projects_per_step
         self.max_projects_per_agent: int = max_projects_per_agent
         self.max_agent_age: int = max_agent_age
+        # RL Reproducibility: dedicated RNG instance (re-seeded in reset())
+        self.rng: np.random.Generator = np.random.default_rng()
         self.age_distribution = GaussianMixture(
             weights=[0.5, 0.5],
             mus=[52, self.max_agent_age],
             sds=[52, self.max_agent_age / 4],
-            rng=np.random,
+            rng=self.rng,
         )
         self.reward_function_name = reward_mode
         self.max_rewardless_steps: int = max_rewardless_steps
@@ -102,6 +104,17 @@ class PeerGroupEnvironment(ParallelEnv):
         self.projects: Dict[str, Project] = {}
         # the ared in which the projects will be situated
         self.area: Area = None
+
+        # --- Episode-level metrics for truncation/horizon analysis ---
+        self._ep_projects_started_total: int = 0
+        self._ep_projects_due_total: int = 0
+        self._ep_projects_evaluated_total: int = 0
+        self._ep_projects_published_total: int = 0
+        self._ep_projects_rejected_total: int = 0
+        self._ep_projects_due_within_episode: int = 0
+        self._ep_n_time_window_clipped: int = 0
+        self._ep_started_start_times: List[float] = []
+        self._ep_started_time_windows: List[float] = []
         self.distances = []
         self.global_density = 1
         self.project_templates: List[Dict[str, Any]] = [
@@ -111,10 +124,29 @@ class PeerGroupEnvironment(ParallelEnv):
                 "prestige": 0.5,
                 "novelty": 0.2,
             },
+            # high novelty, low effort, high prestige (rare)
+            {
+                "required_effort": 15,
+                "prestige": 0.8,
+                "novelty": 0.8,
+            },
+            # low novelty, high effort, low prestige
+            {
+                "required_effort": 50,
+                "prestige": 0.3,
+                "novelty": 0.1,
+            },
+            # high novelty, high effort, high prestige
+            {
+                "required_effort": 100,
+                "prestige": 0.9,
+                "novelty": 0.9,
+            },
         ]
 
     def _init_project_topic_plane(self, n_gaussians=40) -> None:
-        self.area = Area(xlim=(-1, 1), ylim=(-1, 1))
+        # RL Reproducibility: pass instance rng to Area
+        self.area = Area(xlim=(-1, 1), ylim=(-1, 1), rng=self.rng)
 
         # Add Gaussian areas
         for i in range(n_gaussians):
@@ -149,7 +181,7 @@ class PeerGroupEnvironment(ParallelEnv):
             raise ValueError(f"Peer groups must be even, found {len(self.peer_groups)}")
 
         group_pairs = list(
-            np.random.permutation(
+            self.rng.permutation(
                 np.array(list(enumerate(self.peer_groups)), dtype=object)
             )
         )
@@ -169,8 +201,9 @@ class PeerGroupEnvironment(ParallelEnv):
             try:
                 active_only_group1 = self.active_agents[list(group1 - group2)]
                 active_only_group2 = self.active_agents[list(group2 - group1)]
-                agent_idx1 = np.random.choice(active_only_group1)
-                agent_idx2 = np.random.choice(active_only_group2)
+                # RL Reproducibility: use instance rng for random choice
+                agent_idx1 = self.rng.choice(active_only_group1)
+                agent_idx2 = self.rng.choice(active_only_group2)
 
             except ValueError:
                 print(
@@ -194,25 +227,30 @@ class PeerGroupEnvironment(ParallelEnv):
         return None
 
     def _generate_projects(self) -> None:
-        self.open_projects = self.project_templates.copy()
-        for i, project in enumerate(self.open_projects):
+        self.open_projects = []
+        for i in range(self.n_projects_per_step):
+            project = self.rng.choice(self.project_templates).copy()
+
+            # RL Reproducibility: use instance rng for all stochastic project generation
             project["required_effort"] = max(
-                1, int(np.random.gumbel(project["required_effort"], 10))
+                1, int(self.rng.gumbel(project["required_effort"], 10))
             )
             project["prestige"] = np.clip(
-                np.random.normal(project["prestige"], 0.15), 0.1, 1
+                self.rng.normal(project["prestige"], 0.15), 0.1, 1
             )
             project["novelty"] = np.clip(
-                np.random.gumbel(project["novelty"], 0.05), 0.1, 1
+                self.rng.gumbel(project["novelty"], 0.05), 0.1, 1
             )
 
             project["time_window"] = np.ceil(
-                project["required_effort"] * np.random.uniform(0.8, 2)
+                project["required_effort"] * self.rng.uniform(0.8, 2)
             )
             project["current_effort"] = 0
             project["contributors"] = []
             project["start_time"] = 0
             project["finished"] = False
+
+            self.open_projects.append(project)
 
     def _get_active_projects(self, agent: int) -> List[str]:
         return [p for p in self.agent_active_projects[agent] if p is not None]
@@ -235,16 +273,24 @@ class PeerGroupEnvironment(ParallelEnv):
         self, seed: Optional[int] = None, options: Optional[Dict[str, Any]] = None
     ) -> Tuple[Dict[str, Dict[str, Any]], Dict[str, Dict[str, Any]]]:
         if seed is not None:
-            np.random.seed(seed)
-            Area.seed(seed)
-            Project.seed(seed)
+            # RL Reproducibility: re-create the dedicated RNG from the given seed.
+            # This replaces the old np.random.seed() / Area.seed() / Project.seed() approach
+            self.rng = np.random.default_rng(seed)
+
+        # Re-create age distribution with the (potentially new) rng
+        self.age_distribution = GaussianMixture(
+            weights=[0.5, 0.5],
+            mus=[52, self.max_agent_age],
+            sds=[52, self.max_agent_age / 4],
+            rng=self.rng,
+        )
 
         # Reset state variables
         self.timestep = 0
         self.agent_steps = np.zeros(self.n_agents, dtype=np.int32)
         self.agent_ages = self.age_distribution.sample(self.n_agents)
         self.rewardless_steps = np.zeros(self.n_agents, dtype=np.int32)
-        self.agent_h_indexes = np.zeros(self.n_agents, dtype=np.int16)    
+        self.agent_h_indexes = np.zeros(self.n_agents, dtype=np.int16)
         self.agent_rewards = np.zeros(
             (self.n_agents, self.n_steps + 1), dtype=np.float32
         )
@@ -263,6 +309,17 @@ class PeerGroupEnvironment(ParallelEnv):
         self.terminated_agents = np.zeros(self.n_agents, dtype=np.int8)
         self.distances = []
         self.global_density = 1
+
+        # Reset episode-level metrics for horizon analysis
+        self._ep_projects_started_total = 0
+        self._ep_projects_due_total = 0
+        self._ep_projects_evaluated_total = 0
+        self._ep_projects_published_total = 0
+        self._ep_projects_rejected_total = 0
+        self._ep_projects_due_within_episode = 0
+        self._ep_n_time_window_clipped = 0
+        self._ep_started_start_times = []
+        self._ep_started_time_windows = []
 
         # Reinitialize core structures
         self._init_project_topic_plane()
@@ -317,9 +374,10 @@ class PeerGroupEnvironment(ParallelEnv):
         else:
             p = None
         # high reward is rarer
-        not_choosable_this_time = np.random.choice(
+        # RL Reproducibility: use instance rng for stochastic masking
+        not_choosable_this_time = self.rng.choice(
             list(range(1, len(mask["choose_project"]))),
-            np.random.randint(0, len(mask["choose_project"])),
+            self.rng.integers(0, len(mask["choose_project"])),
             replace=False,
             p=p,
         )
@@ -327,10 +385,14 @@ class PeerGroupEnvironment(ParallelEnv):
         # Peer collaboration: MultiBinary for peer group
         peer_group = self.peer_groups[self.agent_peer_idx[idx]]
         mask["collaborate_with"] = np.zeros(self.max_peer_group_size, dtype=np.int8)
-        mask["collaborate_with"][: len(peer_group)] = np.where(
-            self.active_agents[peer_group].astype(bool),
+        
+        # Limit to max_peer_group_size if necessary
+        effective_peer_group = peer_group[:self.max_peer_group_size]
+        
+        mask["collaborate_with"][: len(effective_peer_group)] = np.where(
+            self.active_agents[effective_peer_group].astype(bool),
             2,  ## if active unmask
-            mask["collaborate_with"][: len(peer_group)],  # else keep 0
+            mask["collaborate_with"][: len(effective_peer_group)],  # else keep 0
         )
         if sum(mask["collaborate_with"]) == 0:
             breakpoint()
@@ -385,6 +447,19 @@ class PeerGroupEnvironment(ParallelEnv):
                     )
                     grouped_collaborators |= set(collaborators)
 
+            # Agents who wanted to collaborate but couldn't form a clique (no
+            # mutual match) should still start a solo project so they are not
+            # silently dropped.
+            new_projects = []
+            for idx_in_group in range(len(peer_group)):
+                if idx_in_group not in grouped_collaborators:
+                    agent_id = peer_group[idx_in_group]
+                    if len(self._get_active_projects(agent_id)) < self.max_projects_per_agent:
+                        solo_proj = self._start_open_project(project_idx, [agent_id])
+                        if solo_proj is not None:
+                            new_projects.append((solo_proj, [agent_id]))
+            return new_projects
+
     def _start_open_project(
         self, project_idx: int, contributors: List[int]
     ) -> Optional[str]:
@@ -410,13 +485,23 @@ class PeerGroupEnvironment(ParallelEnv):
         for contributor in contributors:
             self._add_active_project(contributor, new_running_proj["id"])
             self.agent_project_effort[contributor][new_running_proj["id"]] = 0
-        proj_object = Project.from_dict(new_running_proj)
+        proj_object = Project.from_dict(new_running_proj, rng=self.rng)
         proj_object.kene = self._locate_project_in_plane(proj_object)
         proj_object.peer_fit = [
             self._determine_agent_fit(proj_object, agent_i)
             for agent_i in proj_object.contributors
         ]
         self.projects[new_running_proj["id"]] = proj_object
+        # --- Episode metrics: track started project ---
+        self._ep_projects_started_total += 1
+        tw = float(proj_object.time_window)
+        st = float(proj_object.start_time)
+        self._ep_started_start_times.append(st)
+        self._ep_started_time_windows.append(tw)
+        if st + tw <= self.n_steps:
+            self._ep_projects_due_within_episode += 1
+        if tw > 200:
+            self._ep_n_time_window_clipped += 1
         return project_id
 
     def _locate_project_in_plane(self, new_project: Project) -> np.array:
@@ -447,7 +532,7 @@ class PeerGroupEnvironment(ParallelEnv):
         if len(all_contributors_projects) > 0:
             probabilities = softmax(probabilities)
             generator_project = self.projects[
-                np.random.choice(all_contributors_projects, p=probabilities)
+                self.rng.choice(all_contributors_projects, p=probabilities)
             ]
             new_kene = generator_project.kene
             new_project.generator_project_id = generator_project.project_id
@@ -472,7 +557,7 @@ class PeerGroupEnvironment(ParallelEnv):
         # no projects
         if len(all_contributors_projects) == 0:
             new_project.citations = []
-            new_kene = new_kene + np.random.normal(0, new_project.novelty / 2, 2)
+            new_kene = new_kene + self.rng.normal(0, new_project.novelty / 2, 2)
             new_kene = np.tanh(new_kene)
             return new_kene
 
@@ -482,11 +567,11 @@ class PeerGroupEnvironment(ParallelEnv):
         # no projects in vicinity
         if len(projects_in_vicinity) == 0:
             new_project.citations = []
-            new_kene = new_kene + np.random.normal(0, new_project.novelty / 2, 2)
+            new_kene = new_kene + self.rng.normal(0, new_project.novelty / 2, 2)
             new_kene = np.tanh(new_kene)
             return new_kene
 
-        n_cited = min(len(projects_in_vicinity), np.random.randint(10, 21))
+        n_cited = min(len(projects_in_vicinity), int(self.rng.integers(10, 21)))
         n_citations_vicinity = np.array(
             [len(self.projects[p].citations) + 1 for p in projects_in_vicinity]
         ).sum()
@@ -500,7 +585,8 @@ class PeerGroupEnvironment(ParallelEnv):
             for p, psv in zip(projects_in_vicinity, societal_value_vicinity_probs)
         ]
         # weighted by n citations?
-        cited_projects = np.random.choice(
+        # RL Reproducibility: use instance rng for citation selection
+        cited_projects = self.rng.choice(
             projects_in_vicinity, n_cited, p=citation_popularity
         )
         m = 0
@@ -508,7 +594,7 @@ class PeerGroupEnvironment(ParallelEnv):
             cited_project = self.projects[cited_project]
             cited_project.cited_by.append(new_project.project_id)
             cited_position = cited_project.kene
-            m += np.random.uniform(0, 0.1)
+            m += self.rng.uniform(0, 0.1)
             new_kene += (new_kene - cited_position) * (1 - m) / 2
         new_project.citations = cited_projects
         new_kene = np.tanh(new_kene)
@@ -600,11 +686,17 @@ class PeerGroupEnvironment(ParallelEnv):
         self.actions = actions
         self.timestep += 1
 
+        # Per-agent step diagnostics (populated below, returned in infos)
+        _step_effort_applied: Dict[int, float] = {}   # idx -> effort amount this step
+        _step_effort_invalid: Dict[int, bool] = {}     # idx -> True if put_effort was invalid
+        _step_choose_effective: Dict[int, bool] = {}   # idx -> True if choose_project led to a slot
+
         # Track which open projects are selected to be started this step
         agent_project_choices: Dict[int] = {}
         for agent, action in actions.items():
             idx = self.agent_to_id[agent]
             chosen_project = action["choose_project"]
+            chose_effectively = False
 
             if (
                 chosen_project > 0
@@ -613,15 +705,21 @@ class PeerGroupEnvironment(ParallelEnv):
                 open_proj_idx = chosen_project - 1
                 if open_proj_idx < len(self.open_projects):
                     agent_project_choices[idx] = open_proj_idx
+                    chose_effectively = True
+            _step_choose_effective[idx] = chose_effectively
 
             # Apply effort to running projects
-            if (
-                action["put_effort"] > 0
-                and len(self._get_active_projects(idx)) >= action["put_effort"]
-            ):
-
+            # put_effort is a 1-based slot index into agent_active_projects.
+            # Check that the slot exists and contains a project.
+            effort_applied = 0.0
+            effort_invalid = False
+            if action["put_effort"] > 0:
                 selected_project = action["put_effort"] - 1
-                effort_project_id = self.agent_active_projects[idx][selected_project]
+                effort_project_id = (
+                    self.agent_active_projects[idx][selected_project]
+                    if selected_project < len(self.agent_active_projects[idx])
+                    else None
+                )
                 if effort_project_id is not None:
                     effort_project = self.projects[effort_project_id]
                     contributors_idx = (
@@ -636,8 +734,12 @@ class PeerGroupEnvironment(ParallelEnv):
 
                     self.projects[effort_project_id].add_effort(effort_amount)
                     self.agent_project_effort[idx][effort_project_id] += effort_amount
+                    effort_applied = float(effort_amount)
                 else:
-                    print(f"Couldn't find project: {selected_project}")
+                    # put_effort pointed at an empty slot -> invalid
+                    effort_invalid = True
+            _step_effort_applied[idx] = effort_applied
+            _step_effort_invalid[idx] = effort_invalid
         # Collaboration intents (for each agent, with their peers)
         for peer_group in self.peer_groups:
             peer_group = np.array((peer_group))
@@ -669,20 +771,13 @@ class PeerGroupEnvironment(ParallelEnv):
                     collaborators_intents = (
                         collaborators_intents & collaborators_intents.T
                     )
-                    not_enough_collaborators = np.sum(collaborators_intents, axis=0)
-                    not_enough_collaborators = not_enough_collaborators[
-                        not_enough_collaborators < len(collaborator_group)
-                    ]
-                    collaborators_intents = np.delete(
-                        collaborators_intents, not_enough_collaborators, axis=0
-                    )
-                    collaborators_intents = np.delete(
-                        collaborators_intents, not_enough_collaborators, axis=1
-                    )
-                    collaborator_group = np.delete(
-                        collaborator_group, not_enough_collaborators
-                    )
 
+                    # Pass ALL agents who chose this project to _find_project_setting.
+                    # That method already handles: (a) collaborative clique-finding for
+                    # agents with mutual edges, and (b) solo-project fallback for
+                    # agents without mutual matches.  The previous filter here
+                    # (used values as indices for np.delete) would
+                    # systematically remove solo agents.
                     self._find_project_setting(
                         choice, collaborator_group, collaborators_intents
                     )
@@ -698,10 +793,14 @@ class PeerGroupEnvironment(ParallelEnv):
             if p.is_due(self.timestep) and p.finished is False
         ]
 
+        # --- Episode metrics: track due & evaluated ---
+        self._ep_projects_due_total += len(due_projects)
+        self._ep_projects_evaluated_total += len(due_projects)
+
         if len(published_projects) > 1 and self.timestep % 10 == 0:
             # sample up to 1000 projects and take the average distance to their 10 closest neighbors
             if len(self.distances) > 1000:
-                idx = np.random.choice(self.distances.shape[0], 1000, replace=False)
+                idx = self.rng.choice(self.distances.shape[0], 1000, replace=False)
                 distance_sample = self.distances[np.ix_(idx, idx)]
             else:
                 distance_sample = self.distances
@@ -752,6 +851,11 @@ class PeerGroupEnvironment(ParallelEnv):
                 self._distribute_rewards_by_effort(p, reward)
 
             p.finished = True
+            # --- Episode metrics: track published vs rejected ---
+            if reward > 0:
+                self._ep_projects_published_total += 1
+            else:
+                self._ep_projects_rejected_total += 1
 
         new_projects = [p for p in due_projects if p.final_reward > 0]
         if len(new_projects) > 0:
@@ -810,7 +914,8 @@ class PeerGroupEnvironment(ParallelEnv):
 
             termination_prob = np.mean([rewardless_prob, age_prob])
             # Stochastic decision
-            terminations[a] = np.random.rand() < termination_prob
+            # RL Reproducibility: use instance rng for stochastic termination
+            terminations[a] = self.rng.random() < termination_prob
 
         self.terminated_agents = self.terminated_agents | np.fromiter(
             terminations.values(), dtype=bool
@@ -828,27 +933,32 @@ class PeerGroupEnvironment(ParallelEnv):
                 group = self.agent_peer_idx[agent_id]
                 agents_activated_in_step.append(self._activate_agent(group))
         # grow active agents
+        # RL Reproducibility: use instance rng for stochastic growth decisions
         if self.growth_rate < 1:
-            if self.timestep % (1 // self.growth_rate) == 0 and np.random.rand() < 0.7:
+            if self.timestep % (1 // self.growth_rate) == 0 and self.rng.random() < 0.7:
                 # TODO: choice weighted by success?
-                group = np.random.choice(range(self.n_groups))
+                group = int(self.rng.integers(0, self.n_groups))
                 agents_activated_in_step.append(self._activate_agent(group))
         else:
             each_step = np.floor(self.growth_rate)
-            for _ in range(each_step):
-                group = np.random.choice(range(self.n_groups))
+            for _ in range(int(each_step)):
+                group = int(self.rng.integers(0, self.n_groups))
                 agents_activated_in_step.append(self._activate_agent(group))
             if self.timestep % (1 // (self.growth_rate - each_step)) == 0:
-                group = np.random.choice(range(self.n_groups))
+                group = int(self.rng.integers(0, self.n_groups))
                 agents_activated_in_step.append(self._activate_agent(group))
+
+        # regenerate open projects
+        self._generate_projects()
 
         # if len(agents_activated_in_step) > 0:
         #     print(
         #         f"Activated {len(agents_activated_in_step)} agents in step {self.timestep}"
         #     )
 
-        if not all([a is not None for a in agents_activated_in_step]):
-            print("No more agents to activate!")
+        # if not all([a is not None for a in agents_activated_in_step]):
+        #     print("No more agents to activate!")
+
         # Prepare next obs/mask
         observations = {}
         for agent in self.agents:
@@ -857,8 +967,132 @@ class PeerGroupEnvironment(ParallelEnv):
             self.observations[agent] = obs
             self.action_masks[agent] = mask
             observations[agent] = {"observation": obs, "action_mask": mask}
-        infos = {a: {} for a in self.agents}
+
+        # ------------------------------------------------------------------
+        # Build step-level paper_stats (shared across all agents)
+        # ------------------------------------------------------------------
+        n_projects_total = len(self.projects)
+        n_active_projects = sum(
+            1 for p in self.projects.values() if not p.finished
+        )
+        n_due_projects = sum(
+            1 for p in self.projects.values()
+            if p.is_due(self.timestep) and not p.finished
+        )
+        n_published_projects = sum(
+            1 for p in self.projects.values()
+            if p.finished and p.final_reward is not None and p.final_reward > 0
+        )
+        n_rejected_projects = sum(
+            1 for p in self.projects.values()
+            if p.finished and p.final_reward is not None and p.final_reward == 0
+        )
+
+        paper_stats = {
+            "n_projects_total": n_projects_total,
+            "n_active_projects": n_active_projects,
+            "n_due_projects": n_due_projects,
+            "n_published_projects": n_published_projects,
+            "n_rejected_projects": n_rejected_projects,
+        }
+
+        infos: Dict[str, Dict[str, Any]] = {}
+        for agent in self.agents:
+            idx = self.agent_to_id[agent]
+            agent_info: Dict[str, Any] = {"paper_stats": paper_stats}
+
+            # Per-agent effort diagnostics
+            n_active_agent = len(self._get_active_projects(idx))
+            agent_info["debug_effort"] = {
+                "n_active_projects_agent": n_active_agent,
+                "effort_applied_this_step": _step_effort_applied.get(idx, 0.0),
+                "effort_action_invalid": int(_step_effort_invalid.get(idx, False)),
+                "choose_project_effective": int(_step_choose_effective.get(idx, False)),
+            }
+            infos[agent] = agent_info
+
         return observations, self.rewards, terminations, truncations, infos
+
+
+    # Episode-level metrics for horizon / truncation analysis
+    def get_episode_metrics(self) -> Dict[str, Any]:
+        """Compute and return episode-level metrics for truncation analysis.
+
+        Call this at episode end (terminated or truncated) to get a flat dict
+        with project-horizon feasibility, open-project, and obs-clipping stats.
+        """
+        started = self._ep_projects_started_total
+
+        # --- A) Project horizon feasibility ---
+        due_within = self._ep_projects_due_within_episode
+        due_rate = due_within / max(1, started)
+
+        start_times = np.asarray(self._ep_started_start_times, dtype=np.float64)
+        time_windows = np.asarray(self._ep_started_time_windows, dtype=np.float64)
+
+        if len(start_times) > 0:
+            st_mean = float(np.mean(start_times))
+            st_p95 = float(np.percentile(start_times, 95))
+            st_max = float(np.max(start_times))
+            tw_mean = float(np.mean(time_windows))
+            tw_p95 = float(np.percentile(time_windows, 95))
+            tw_max = float(np.max(time_windows))
+        else:
+            st_mean = st_p95 = st_max = 0.0
+            tw_mean = tw_p95 = tw_max = 0.0
+
+        # --- B) Open projects at episode end ---
+        open_projects = [
+            p for p in self.projects.values() if not p.finished
+        ]
+        projects_open_end = len(open_projects)
+
+        if projects_open_end > 0:
+            ttd = np.array(
+                [
+                    (p.start_time + p.time_window) - self.timestep
+                    for p in open_projects
+                ],
+                dtype=np.float64,
+            )
+            open_ttd_mean = float(np.mean(ttd))
+            open_ttd_min = float(np.min(ttd))
+            open_ttd_p95 = float(np.percentile(ttd, 95))
+            open_ttd_max = float(np.max(ttd))
+        else:
+            open_ttd_mean = open_ttd_min = open_ttd_p95 = open_ttd_max = 0.0
+
+        # --- C) Observation clipping for time_window (obs space caps at 200) ---
+        n_clipped = self._ep_n_time_window_clipped
+        clipped_rate = n_clipped / max(1, started)
+
+        # Max true time_window among those > 200
+        over_200 = time_windows[time_windows > 200] if len(time_windows) > 0 else np.array([])
+        tw_over_200_max = float(np.max(over_200)) if len(over_200) > 0 else 0.0
+
+        return {
+            "projects_started_total": started,
+            "projects_due_total": self._ep_projects_due_total,
+            "projects_evaluated_total": self._ep_projects_evaluated_total,
+            "projects_published_total": self._ep_projects_published_total,
+            "projects_rejected_total": self._ep_projects_rejected_total,
+            "projects_due_within_episode_count": due_within,
+            "due_within_episode_rate": due_rate,
+            "started_start_time_mean": st_mean,
+            "started_start_time_p95": st_p95,
+            "started_start_time_max": st_max,
+            "started_time_window_mean": tw_mean,
+            "started_time_window_p95": tw_p95,
+            "started_time_window_max": tw_max,
+            "projects_open_end": projects_open_end,
+            "open_time_to_deadline_mean": open_ttd_mean,
+            "open_time_to_deadline_min": open_ttd_min,
+            "open_time_to_deadline_p95": open_ttd_p95,
+            "open_time_to_deadline_max": open_ttd_max,
+            "n_time_window_clipped": n_clipped,
+            "clipped_rate": clipped_rate,
+            "true_time_window_over_200_max": tw_over_200_max,
+        }
 
     def _get_observation(self, agent: str) -> Dict[str, Any]:
         idx = self.agent_to_id[agent]

@@ -1,5 +1,5 @@
 __pycache__
-log
+log/
 .idea/
 
 # LaTeX
@@ -18,9 +18,12 @@ thesis/*.pdf
 
 # RL
 wandb/
+results/
 ray_results/
 checkpoints/
 runs/
+models/
+artifacts/
 *.pt
 *.ckpt
 *.pkl

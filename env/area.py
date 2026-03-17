@@ -6,15 +6,12 @@ import numpy as np
 
 
 class Area:
-    def __init__(self, xlim=(0, 100), ylim=(0, 100)):
+    def __init__(self, xlim=(0, 100), ylim=(0, 100), rng=None):
         self.xlim = xlim
         self.ylim = ylim
         self.areas = []  # list of (x0, y0, sigma, value)
-
-    @staticmethod
-    def seed(seed: int):
-        if seed is not None:
-            np.random.seed(seed)
+        # RL Reproducibility: use a dedicated Generator instead of global np.random
+        self.rng = rng if rng is not None else np.random.default_rng()
 
     @staticmethod
     def distance(p1, p2):
@@ -26,18 +23,20 @@ class Area:
         return np.linalg.norm(p2 - p1, axis=1)
 
     def random_point(self):
-        x = np.random.uniform(*self.xlim)
-        y = np.random.uniform(*self.ylim)
+        # RL Reproducibility: use instance rng
+        x = self.rng.uniform(*self.xlim)
+        y = self.rng.uniform(*self.ylim)
         return (x, y)
 
     def random_gaussian_point(self):
+        # RL Reproducibility: use instance rng
         x = np.tanh(
-            np.random.normal(
+            self.rng.normal(
                 np.mean(np.array(self.xlim)), 0.3 * np.abs(self.xlim[0] - self.xlim[1])
             )
         )
         y = np.tanh(
-            np.random.normal(
+            self.rng.normal(
                 np.mean(np.array(self.ylim)), 0.3 * np.abs(self.ylim[0] - self.ylim[1])
             )
         )

@@ -15,6 +15,7 @@ class Project:
         prestige: float,
         time_window: int,
         peer_fit: np.ndarray,
+        rng: np.random.Generator = None,
         **kwargs,
     ):
         self.project_id = project_id
@@ -22,6 +23,8 @@ class Project:
         self.prestige = prestige
         self.time_window = time_window
         self.peer_fit = peer_fit
+        # RL Reproducibility: use a dedicated Generator instead of global np.random
+        self.rng = rng if rng is not None else np.random.default_rng()
         # Project state
         self.current_effort = 0
         self.contributors: List[int] = []
@@ -45,10 +48,6 @@ class Project:
         self.novelty_score = 0.0
         self.societal_value_score = 0.0
 
-    @staticmethod
-    def seed(seed: int):
-        if seed is not None:
-            np.random.seed(seed)
 
     def add_contributor(self, agent_id: int) -> bool:
         """Add an agent as a contributor to the project."""
@@ -82,8 +81,9 @@ class Project:
     ) -> float:
         """Calculate the final quality of the completed project."""
 
-        # the higher the prestige the samller the noise
-        self.validation_noise = np.random.normal(1, noise_factor * (1 - self.prestige))
+        # the higher the prestige the smaller the noise
+        # RL Reproducibility: use instance rng for validation noise
+        self.validation_noise = self.rng.normal(1, noise_factor * (1 - self.prestige))
         # Base quality based on effort and prestige
         self.effort_score = self.calculate_effort_score(self.validation_noise)
         self.novelty_score = self.calculate_novelty_score(relative_density)
@@ -110,10 +110,14 @@ class Project:
         return topic_area.value_at(*self.kene)
 
     def calculate_reward(self, quality, threshold=0.5, noise_factor=0.15) -> float:
+        # If quality surpasses threshold scaled by prestige, assign a positive reward
         if quality > threshold * self.prestige:
-            self.final_reward = self.prestige + np.random.normal(0, noise_factor)
+            # Reproducibility: use instance rng for reward noise
+            self.final_reward = self.prestige + self.rng.normal(0, noise_factor)
+            # Ensure reward is non-negative
+            self.final_reward = float(max(0.0, self.final_reward))
         else:
-            self.final_reward = 0
+            self.final_reward = 0.0
         return self.final_reward
 
     def to_dict(self) -> Dict[str, Any]:
@@ -146,7 +150,7 @@ class Project:
         }
 
     @classmethod
-    def from_dict(cls, data: Dict[str, Any]) -> "Project":
+    def from_dict(cls, data: Dict[str, Any], rng: np.random.Generator = None) -> "Project":
         """Create a Project instance from a dictionary."""
         project = cls(
             project_id=data["id"],
@@ -158,6 +162,7 @@ class Project:
                 if isinstance(data["peer_fit"], list)
                 else data["peer_fit"]
             ),
+            rng=rng,
         )
 
         # Restore state
