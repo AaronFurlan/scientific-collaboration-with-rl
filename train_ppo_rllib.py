@@ -675,6 +675,19 @@ def main(
             "a multi-head action model."
         )
 
+    # GUARD: Ensure that the peer group size in the environment does not exceed max_peer_group_size.
+    # The environment distributes agents into n_groups. Average size = n_agents / n_groups.
+    # If this ratio is larger than max_peer_group_size, the environment logic (reset/step) will crash.
+    avg_group_size = n_agents / n_groups
+    if avg_group_size > max_peer_group_size:
+        raise ValueError(
+            f"CONFIGURATION ERROR: n_agents({n_agents}) / n_groups({n_groups}) = {avg_group_size:.2f}, "
+            f"which is greater than max_peer_group_size({max_peer_group_size}).\n"
+            "This would cause a broadcast error in the environment because the peer group "
+            "size exceeds the pre-allocated space for observations and action masks.\n"
+            "Solution: Increase n_groups, decrease n_agents, or increase max_peer_group_size (if < 13)."
+        )
+
     # 1) Ray init (robust, begrenzte Ressourcen)
     ray.init(
         ignore_reinit_error=True,
