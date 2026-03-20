@@ -24,6 +24,7 @@ checkpoints/
 runs/
 models/
 artifacts/
+iteration_time/
 *.pt
 *.ckpt
 *.pkl
