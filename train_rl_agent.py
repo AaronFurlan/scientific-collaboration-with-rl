@@ -708,6 +708,10 @@ def main(
     try:
         if wandb_mode != "disabled":
             # Build a flat config dict for wandb
+            # Since some values are defined later in the script (workers, rollout_length),
+            # we use the arguments/locals to build the config.
+            num_workers = 1 if info_action else 8
+
             wandb_config: Dict[str, Any] = {
                 "algo": algo,
                 "framework": framework,
@@ -718,6 +722,9 @@ def main(
                 "controlled_agent_id": controlled_agent_id,
                 "reward_function": reward_function,
                 "acceptance_threshold": acceptance_threshold,
+                "train_batch_size": train_batch_size,
+                "num_workers": num_workers,
+                "rollout_fragment_length": "auto",
                 "env": {
                     "n_agents": n_agents,
                     "start_agents": start_agents,
@@ -921,13 +928,15 @@ def main(
     )
 
     if info_action:
-        config = _set_rollout_workers_compat(config, num_workers=1)
+        num_workers = 1
+        config = _set_rollout_workers_compat(config, num_workers=num_workers)
         config = config.evaluation(evaluation_num_env_runners=0)
     else:
         # Each worker runs its own environment and collects samples in parallel.
         # With 10 workers, 4000 steps batch size, each worker collects 400 steps.
         # This fits well within the 600s timeout even if steps are slow.
-        config = _set_rollout_workers_compat(config, num_workers=8)
+        num_workers = 8
+        config = _set_rollout_workers_compat(config, num_workers=num_workers)
 
     # Rebuild the algorithm with evaluation enabled
     config = config.env_runners(
