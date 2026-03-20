@@ -649,6 +649,9 @@ def main(
     train_batch_size: int = 32000,
     # Checkpoint options
     save_every_n_iters: int = 50,
+    # Profiling overrides
+    num_workers: Optional[int] = None,
+    evaluation_interval: Optional[int] = None,
 ):
 
     # Seed all RNGs (random, numpy, torch, cuda) for reproducibility
@@ -703,6 +706,11 @@ def main(
     )
 
     # 1b) Optional Weights & Biases init (driver-only)
+    os.environ["WANDB_SILENT"] = "true"
+    # Unterdrückt Ray-Deprecation-Warnungen (z.B. TBXLogger)
+    os.environ["PYTHONWARNINGS"] = "ignore::DeprecationWarning"
+    # Erhöht den HTTP-Timeout für GraphQL-Anfragen (Standard ist oft zu niedrig)
+    os.environ["WANDB_HTTP_TIMEOUT"] = "60"
     use_wandb = False
     wandb_run = None
     try:
@@ -755,6 +763,7 @@ def main(
                 "config": wandb_config,
                 "name": run_name,
                 "mode": wandb_mode,
+                "settings": wandb.Settings(silent=True, console="off", request_timeout=60)
             }
             if wandb_entity:
                 init_kwargs["entity"] = wandb_entity
@@ -913,10 +922,15 @@ def main(
         from ray.rllib.algorithms.callbacks import make_multi_callbacks
         config = config.callbacks(make_multi_callbacks(callback_classes))
 
+    if evaluation_interval is not None:
+        _eval_interval = evaluation_interval
+    else:
+        _eval_interval = 1
+
     # Enable evaluation runners and periodic evaluation
     config = config.evaluation(
         # Run one evaluation round every iteration.
-        evaluation_interval=5,
+        evaluation_interval=_eval_interval,
 
         # Create extra evaluation EnvRunners in the evaluation group.
         evaluation_num_env_runners=2,
@@ -925,18 +939,24 @@ def main(
         evaluation_duration_unit="episodes",
         evaluation_duration=5,
         evaluation_config={"explore": False},
+
+        # Allow more time for evaluation episodes to complete
+        evaluation_sample_timeout_s=300.0,
     )
 
     if info_action:
-        num_workers = 1
-        config = _set_rollout_workers_compat(config, num_workers=num_workers)
+        _num_workers = 1
+        config = _set_rollout_workers_compat(config, num_workers=_num_workers)
         config = config.evaluation(evaluation_num_env_runners=0)
+    elif num_workers is not None:
+        _num_workers = num_workers
+        config = _set_rollout_workers_compat(config, num_workers=_num_workers)
     else:
         # Each worker runs its own environment and collects samples in parallel.
         # With 10 workers, 4000 steps batch size, each worker collects 400 steps.
         # This fits well within the 600s timeout even if steps are slow.
-        num_workers = 8
-        config = _set_rollout_workers_compat(config, num_workers=num_workers)
+        _num_workers = 8
+        config = _set_rollout_workers_compat(config, num_workers=_num_workers)
 
     # Rebuild the algorithm with evaluation enabled
     config = config.env_runners(
@@ -997,18 +1017,7 @@ def main(
             eval_return_str = "n/a" if not has_valid_eval else f"{eval_return_val:8.2f}"
             train_return_str = "n/a" if not has_valid_train else f"{train_return_val:8.2f}"
 
-            log_line = (
-                f"Iter {i:03d} | "
-                f"TrainReturn: {train_return_str} | "
-                f"EvalReturn: {eval_return_str} | "
-            )
-            if not math.isnan(_kl):
-                log_line += f"KL: {_kl:6.4f} | "
-            if not math.isnan(_vf):
-                log_line += f"VF_var: {_vf:7.4f} "
-            
-            log_line += f"{status}"
-            print(log_line)
+            checkpoint_info = ""
 
             history_entry: Dict[str, Any] = {
                 "iter": i,
@@ -1045,12 +1054,9 @@ def main(
                     os.makedirs(chkpt_dir, exist_ok=True)
                     algo_instance.save_checkpoint(chkpt_dir)
                     best_checkpoint_path = chkpt_dir
-                    print(
-                        f"[checkpoint] new best eval return {eval_return_val:.4f} "
-                        f"at iter {i} -> {best_checkpoint_path}"
-                    )
+                    checkpoint_info += " | [Checkpoint saved] best"
                 except Exception as e:
-                    print(f"[checkpoint] ERROR: could not save best checkpoint at iter {i}: {e}")
+                    checkpoint_info += f" | [checkpoint] ERROR best: {e}"
 
                 # WandB artifact for new best model
                 if use_wandb and best_checkpoint_path is not None:
@@ -1063,17 +1069,14 @@ def main(
                             artifact.add_dir(best_checkpoint_path)
                         elif os.path.isfile(best_checkpoint_path):
                             artifact.add_file(best_checkpoint_path)
-                        else:
-                            print(f"[checkpoint] WARNING: best checkpoint path not found: {best_checkpoint_path}")
                         wandb.log_artifact(artifact)
                     except Exception as e:
-                        print(f"[checkpoint] WARNING: wandb artifact logging failed at iter {i}: {e}")
+                        checkpoint_info += f" | [wandb] artifact error: {e}"
             elif not has_valid_eval:
                 # No evaluation was run this iteration (expected for non-eval iterations)
                 if (i + 1) % 5 == 0:
                     # Only warn when evaluation *should* have happened
-                    print(f"[checkpoint] no valid eval at iter {i} (eval expected but missing/NaN)")
-            # else: valid eval, but not a new best – nothing to do
+                    checkpoint_info += " | [checkpoint] no valid eval"
 
             # ------------------------------------------------------------------
             # Periodic checkpoint: save every N iterations regardless of eval
@@ -1091,11 +1094,22 @@ def main(
                     os.makedirs(chkpt_dir, exist_ok=True)
                     algo_instance.save_checkpoint(chkpt_dir)
                     last_checkpoint_path = chkpt_dir
-                    print(
-                        f"[checkpoint] periodic save at iter {i} -> {last_checkpoint_path}"
-                    )
+                    checkpoint_info += " | [Checkpoint saved] periodic"
                 except Exception as e:
-                    print(f"[checkpoint] ERROR: periodic save failed at iter {i}: {e}")
+                    checkpoint_info += f" | [checkpoint] ERROR periodic: {e}"
+
+            log_line = (
+                f"Iter {i:03d} | "
+                f"TrainReturn: {train_return_str} | "
+                f"EvalReturn: {eval_return_str} | "
+            )
+            if not math.isnan(_kl):
+                log_line += f"KL: {_kl:6.4f} | "
+            if not math.isnan(_vf):
+                log_line += f"VF_var: {_vf:7.4f} "
+            
+            log_line += f"{status}{checkpoint_info}"
+            print(log_line)
 
             # ------------------------------------------------------------------
             # WandB logging (driver-only)
