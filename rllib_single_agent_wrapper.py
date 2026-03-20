@@ -46,6 +46,8 @@ from gymnasium.spaces import Box
 
 import logging
 
+from agent_policies import do_nothing_policy
+
 logger = logging.getLogger(__name__)
 
 
@@ -135,21 +137,30 @@ class RLLibSingleAgentWrapper(gym.Env):
         if self._ref_agent is None:
             raise ValueError("env.possible_agents is missing/empty; cannot select ref agent.")
 
-        # ---- Macro action-space (Discrete) ----
+        # ---- Multi-head action-space (Dict) ----
         # These attributes exist in your PeerGroupEnvironment
         self._CP = int(self.env.n_projects_per_step + 1)      # choose_project
         self._PE = int(self.env.max_projects_per_agent + 1)   # put_effort
-        self._CB = int(self.env.max_peer_group_size)          # collaborate bits
+        self._CB = int(self.env.max_peer_group_size)          # collaborate bits (max_peer_slots)
 
-        if self._CB > 16:
-            raise ValueError(
-                f"max_peer_group_size={self._CB} is too large for macro-action encoding. "
-                "Use <= 12-ish, or implement a multi-head model."
-            )
+        # Use a flat Box for the action space to satisfy RLlib's ModelCatalog
+        # while still allowing multiple heads to be represented.
+        # Box allows arbitrary number of heads and continuous/discrete ranges
+        # by treating them as floats that we cast back to int/bits.
+        # CP: choose_project [0, CP-1]
+        # PE: put_effort [0, PE-1]
+        # CB: collaborate_with [0, 1] x CB
+        # Total length: 1 + 1 + CB = CB + 2
+        
+        low = np.zeros(self._CB + 2, dtype=np.float32)
+        high = np.concatenate([
+            [float(self._CP - 1), float(self._PE - 1)],
+            np.ones(self._CB, dtype=np.float32)
+        ]).astype(np.float32)
+        self.action_space = gym.spaces.Box(low=low, high=high, dtype=np.float32)
 
-        self._COLLAB_BASE = 1 << self._CB
-        self._ACTION_N = self._CP * self._PE * self._COLLAB_BASE
-        self.action_space = gym.spaces.Discrete(self._ACTION_N)
+        # Internal state for slot mapping (identity mapping as requested)
+        self._slot_to_peer_index = list(range(self._CB))
 
         # ---- Build stable observation template from env.observation_space ----
         # We need the env's observation_space(agent) which corresponds to the "observation" part.
@@ -208,12 +219,43 @@ class RLLibSingleAgentWrapper(gym.Env):
     # Action encoding/decoding
     # -----------------------------
 
-    def _decode_action(self, a: int) -> ActionDict:
-        """Decode macro-action a into env dict action."""
-        a = int(a)
+    def _decode_action(self, a: Any) -> ActionDict:
+        """Pass-through or convert action into env dict format.
+        
+        Now expects a flat Box (numpy array) of shape (CB + 2,).
+        We cast the floats back to integer heads.
+        """
+        if isinstance(a, np.ndarray) and a.ndim == 1 and len(a) == (self._CB + 2):
+            # Box-based actions (floats)
+            choose_project = int(np.round(a[0]))
+            put_effort = int(np.round(a[1]))
+            collab_bits = np.round(a[2:]).astype(np.int8)
+            return {
+                "choose_project": choose_project,
+                "put_effort": put_effort,
+                "collaborate_with": collab_bits,
+            }
 
-        collab_code = a % self._COLLAB_BASE
-        a //= self._COLLAB_BASE
+        if isinstance(a, (tuple, list)):
+            return {
+                "choose_project": int(a[0]),
+                "put_effort": int(a[1]),
+                "collaborate_with": np.asarray(a[2], dtype=np.int8),
+            }
+        
+        if isinstance(a, dict):
+            # Already in dict format from our older action_space
+            return {
+                "choose_project": int(a.get("choose_project", 0)),
+                "collaborate_with": np.asarray(a.get("collaborate_with", np.zeros(self._CB, dtype=np.int8)), dtype=np.int8),
+                "put_effort": int(a.get("put_effort", 0)),
+            }
+        
+        # Fallback for old integer actions (if any remain in tests/heuristics)
+        a = int(a)
+        collab_base = 1 << self._CB
+        collab_code = a % collab_base
+        a //= collab_base
 
         put_effort = a % self._PE
         a //= self._PE
@@ -228,30 +270,14 @@ class RLLibSingleAgentWrapper(gym.Env):
             "put_effort": int(put_effort),
         }
 
-    def decode_action_id(self, action_id: int) -> Dict[str, Any]:
-        """Public API: decode a discrete macro-action id into a human-readable dict.
+    def decode_action_id(self, action_id: Any) -> Dict[str, Any]:
+        """Public API: decode an action into a human-readable dict.
 
-        Returns a dict like::
-
-            {
-                "action_id": 1159,
-                "choose_project": 0,
-                "put_effort": 4,
-                "collaborate_with": [1, 0, 1, 0, 0, 1, 0, 0],
-                "n_collaborators": 3,
-            }
-
-        Raises ``ValueError`` if *action_id* is outside the valid range.
+        Now supports both dict actions and legacy integer IDs.
         """
-        action_id = int(action_id)
-        if action_id < 0 or action_id >= self._ACTION_N:
-            raise ValueError(
-                f"action_id={action_id} out of range [0, {self._ACTION_N})"
-            )
         decoded = self._decode_action(action_id)
         collab = decoded["collaborate_with"]
         return {
-            "action_id": action_id,
             "choose_project": decoded["choose_project"],
             "put_effort": decoded["put_effort"],
             "collaborate_with": collab.tolist() if hasattr(collab, "tolist") else list(collab),
@@ -567,6 +593,7 @@ class RLLibSingleAgentWrapper(gym.Env):
         Env returns per-agent nested obs:
           {"observation": <dict>, "action_mask": <dict>}
         We flatten both in a stable, template-driven order.
+        We also append a peer_valid_mask indicating which slots contain real peers.
         """
         if not (isinstance(nested_obs, dict) and "observation" in nested_obs):
             raise TypeError("Expected nested obs: {'observation': ..., 'action_mask': ...}")
@@ -577,7 +604,17 @@ class RLLibSingleAgentWrapper(gym.Env):
         obs_vec = self._flatten_any_like_template(obs_part, self._obs_template)
         mask_vec = self._flatten_mask_like_template(mask_part, self._mask_template)
 
-        out = np.concatenate([obs_vec, mask_vec]).astype(np.float32, copy=False)
+        # Build peer_valid_mask: 1 if peer_group[i] > 0 (or peer is present), 0 otherwise.
+        # peer_group in PeerGroupEnvironment uses 0 for no agent (agents are 1-indexed in IDs or positive).
+        peer_group = np.asarray(obs_part.get("peer_group", np.zeros(self._CB)))
+        peer_valid_mask = (peer_group > 0).astype(np.float32)
+        if peer_valid_mask.size < self._CB:
+            pad = np.zeros(self._CB - peer_valid_mask.size, dtype=np.float32)
+            peer_valid_mask = np.concatenate([peer_valid_mask, pad])
+        elif peer_valid_mask.size > self._CB:
+            peer_valid_mask = peer_valid_mask[:self._CB]
+
+        out = np.concatenate([obs_vec, mask_vec, peer_valid_mask]).astype(np.float32, copy=False)
         return out
 
     def _flatten_any_like_template(self, x: Any, tmpl: Any) -> np.ndarray:
@@ -671,7 +708,7 @@ class RLLibSingleAgentWrapper(gym.Env):
         for ag in active_agents:
             if ag == self.current_controlled:
                 nested_obs = self._last_observations[ag]
-                decoded = self._decode_action(int(action))
+                decoded = self._decode_action(action)
                 decoded = self._apply_action_mask(decoded, nested_obs, agent_id=ag)
                 actions[ag] = decoded
             else:
@@ -682,19 +719,24 @@ class RLLibSingleAgentWrapper(gym.Env):
                     # applied consistently (mask repair remains a no-op for
                     # already valid actions).
                     nested_obs = self._last_observations[ag]
-                    a = policy(nested_obs)
+                    try:
+                        a = policy(nested_obs)
+                    except Exception as e:
+                        logger.error(f"Policy for agent {ag} failed: {e}")
+                        a = do_nothing_policy(nested_obs["observation"], nested_obs["action_mask"])
+                    
                     if isinstance(a, dict):
                         a = self._apply_action_mask(a, nested_obs, agent_id=ag)
                     actions[ag] = a
                 else:
-                    # BUGFIX: env.action_space(ag).sample() returns a Dict -> cannot int() it.
-                    # Sample a macro-action from *this wrapper's* Discrete action_space.
-                    raw = int(self.action_space.sample())
+                    # Sample from this wrapper's action_space.
+                    raw = self.action_space.sample()
                     decoded = self._decode_action(raw)
                     nested_obs = self._last_observations.get(ag, {})
                     decoded = self._apply_action_mask(decoded, nested_obs, agent_id=ag)
                     actions[ag] = decoded
 
+        # print(f"Wrapper.step(t={self._t}) with {len(actions)} actions")
         observations, rewards, terminations, truncations, infos = self.env.step(actions)
         self._last_observations = observations
 

@@ -11,43 +11,43 @@ from ray.rllib.algorithms.callbacks import DefaultCallbacks
 # but needs no env reference (works in any Ray worker process).
 # ---------------------------------------------------------------------------
 
-class MacroActionDecoder:
-    """Decode a discrete macro-action id into a human-readable dict.
-
-    Encoding layout (least-significant first):
-        action_id = choose_project * (PE * COLLAB_BASE) + put_effort * COLLAB_BASE + collab_code
-    where COLLAB_BASE = 2 ** CB.
-    """
+class BoxActionDecoder:
+    """Decode a flat Box action (numpy array) into a human-readable dict."""
 
     def __init__(self, n_projects_per_step: int, max_projects_per_agent: int,
                  max_peer_group_size: int):
-        self.CP = int(n_projects_per_step) + 1      # choose_project choices
-        self.PE = int(max_projects_per_agent) + 1  # put_effort choices
-        self.CB = int(max_peer_group_size)         # collaboration bits
-        self.COLLAB_BASE = 1 << self.CB
-        self.ACTION_N = self.CP * self.PE * self.COLLAB_BASE
+        self.CP = int(n_projects_per_step) + 1
+        self.PE = int(max_projects_per_agent) + 1
+        self.CB = int(max_peer_group_size)
 
-    def decode(self, action_id: int) -> Dict[str, Any]:
-        a = int(action_id)
-        if a < 0 or a >= self.ACTION_N:
-            return {"action_id": a, "error": f"out of range [0, {self.ACTION_N})"}
+    def decode(self, action: Any) -> Dict[str, Any]:
+        if isinstance(action, np.ndarray) and action.ndim == 1 and len(action) == (self.CB + 2):
+            choose_project = int(np.round(action[0]))
+            put_effort = int(np.round(action[1]))
+            collab_bits = np.round(action[2:]).astype(np.int8)
+            return {
+                "choose_project": choose_project,
+                "put_effort": put_effort,
+                "collaborate_with": collab_bits.tolist(),
+                "n_collaborators": int(np.sum(collab_bits)),
+            }
+        
+        # Fallback for integer actions (if any)
+        if isinstance(action, (int, np.integer)):
+            a = int(action)
+            collab_base = 1 << self.CB
+            collab_code = a % collab_base
+            a //= collab_base
+            put_effort = a % self.PE
+            a //= self.PE
+            choose_project = a % self.CP
+            return {
+                "choose_project": choose_project,
+                "put_effort": put_effort,
+                "n_collaborators": bin(collab_code).count('1'),
+            }
 
-        collab_code = a % self.COLLAB_BASE
-        a //= self.COLLAB_BASE
-        put_effort = a % self.PE
-        a //= self.PE
-        choose_project = a % self.CP
-
-        collab_bits = [(collab_code >> i) & 1 for i in range(self.CB)]
-        n_collab = sum(collab_bits)
-
-        return {
-            "action_id": int(action_id),
-            "choose_project": choose_project,
-            "put_effort": put_effort,
-            "collaborate_with": collab_bits,
-            "n_collaborators": n_collab,
-        }
+        return {"error": f"unsupported action type: {type(action)}", "val": str(action)}
 
 
 # ---------------------------------------------------------------------------
@@ -73,7 +73,7 @@ def make_action_info_callback(
     """
 
     # Build the decoder once; it will be serialised into every worker.
-    _decoder = MacroActionDecoder(
+    _decoder = BoxActionDecoder(
         n_projects_per_step=n_projects_per_step,
         max_projects_per_agent=max_projects_per_agent,
         max_peer_group_size=max_peer_group_size,
@@ -88,17 +88,13 @@ def make_action_info_callback(
             self._printed_header = False
             self.decoder = _decoder
 
-        def _format_decoded(self, action_id: Any) -> str:
-            """Return ``action_id=<id> decoded={...}`` string."""
+        def _format_decoded(self, action: Any) -> str:
+            """Return ``action=<val> decoded={...}`` string."""
             try:
-                aid = int(action_id)
-            except Exception:
-                return f"action_id={action_id} decoded=<unavailable>"
-            try:
-                decoded = self.decoder.decode(aid)
-            except Exception:
-                return f"action_id={aid} decoded=<unavailable>"
-            return f"action_id={aid} decoded={decoded}"
+                decoded = self.decoder.decode(action)
+            except Exception as e:
+                return f"action={action} decoded=<error: {e}>"
+            return f"action={action} decoded={decoded}"
 
         # ------------------------------------------------------------------
         # on_episode_step – per env.step(); primary per-step logging hook
@@ -125,8 +121,7 @@ def make_action_info_callback(
             if not self._printed_header:
                 print(
                     f"[ACTION] on_episode_step enabled: "
-                    f"interval={self.info_interval} "
-                    f"action_space_n={self.decoder.ACTION_N}"
+                    f"interval={self.info_interval}"
                 )
                 self._printed_header = True
 
@@ -139,18 +134,32 @@ def make_action_info_callback(
                 except Exception:
                     pass
 
+            if action is None:
+                try:
+                    # RLlib v2 multi-agent episode
+                    if hasattr(episode, "get_actions_for_agent"):
+                         action = episode.get_actions_for_agent(self.controlled_agent_id, -1)
+                except Exception:
+                    pass
+
             # --- Old-stack Episode API ---
             if action is None:
                 try:
                     if hasattr(episode, "get_last_action"):
                         action = episode.get_last_action()
+                        if action is None and hasattr(episode, "last_action_for"):
+                             action = episode.last_action_for(self.controlled_agent_id)
                 except Exception:
                     pass
 
             if action is None:
                 try:
+                    # In some RLlib versions, user_data or other dicts might hold it
                     if hasattr(episode, "last_action_for"):
                         action = episode.last_action_for(self.controlled_agent_id)
+                    
+                    if action is None and hasattr(episode, "_agent_to_last_action"):
+                        action = episode._agent_to_last_action.get(self.controlled_agent_id)
                 except Exception:
                     pass
 
@@ -276,24 +285,26 @@ def make_action_info_callback(
 
             # Compact summary with decoded top actions
             total = len(actions_list)
-            unique, counts = np.unique(actions_list, return_counts=True)
-            top_k = min(5, len(unique))
+            # Use string representation for unique as Box actions are numpy arrays
+            str_actions = [str(a) for a in actions_list]
+            unique_str, indices, counts = np.unique(str_actions, return_index=True, return_counts=True)
+            top_k = min(5, len(unique_str))
             sorted_idx = np.argsort(-counts)[:top_k]
 
             top_entries = []
             for i in sorted_idx:
-                aid = int(unique[i])
+                action = actions_list[indices[i]]
                 cnt = int(counts[i])
                 try:
-                    dec = self.decoder.decode(aid)
+                    dec = self.decoder.decode(action)
                     top_entries.append(
-                        f"id={aid} cnt={cnt} "
+                        f"cnt={cnt} "
                         f"proj={dec['choose_project']} "
                         f"effort={dec['put_effort']} "
                         f"collab={dec['n_collaborators']}"
                     )
                 except Exception:
-                    top_entries.append(f"id={aid} cnt={cnt}")
+                    top_entries.append(f"val={action} cnt={cnt}")
 
             summary = " | ".join(top_entries)
             print(

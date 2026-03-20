@@ -667,12 +667,13 @@ def main(
 
     policy_distribution = POLICY_CONFIGS[policy_config_name]
 
-    # IMPORTANT: macro-action encoding explodes with large max_peer_group_size.
-    if max_peer_group_size > 16:
+    # Multi-head action encoding is used in the wrapper (MultiBinary for collaboration).
+    # The exponential explosion of Discrete(2^N) is avoided.
+    # We still keep a reasonable limit for observation vector size and PPO convergence.
+    if max_peer_group_size > 100:
         raise ValueError(
-            f"max_peer_group_size={max_peer_group_size} is too large for the current "
-            "macro-action wrapper approach. Use <= 12-ish for PPO training, or implement "
-            "a multi-head action model."
+            f"max_peer_group_size={max_peer_group_size} is very large. "
+            "Even with MultiBinary, very large groups might slow down training."
         )
 
     # GUARD: Ensure that the peer group size in the environment does not exceed max_peer_group_size.
@@ -881,7 +882,7 @@ def main(
     config = config.env_runners(
         rollout_fragment_length="auto",
         # optional, falls verfügbar:
-        sample_timeout_s=300,
+        sample_timeout_s=600,
     )
 
     # ------------------------------------------------------------------
@@ -1258,8 +1259,8 @@ if __name__ == "__main__":
     parser.add_argument("--start-agents", type=int, default=200)
     parser.add_argument("--max-steps", type=int, default=600)
     parser.add_argument("--max-rewardless-steps", type=int, default=500)
-    parser.add_argument("--n-groups", type=int, default=20)
-    parser.add_argument("--max-peer-group-size", type=int, default=13)  # keep small!
+    parser.add_argument("--n-groups", type=int, default=50)
+    parser.add_argument("--max-peer-group-size", type=int, default=40)  # keep small!
     parser.add_argument("--n-projects-per-step", type=int, default=1)
     parser.add_argument("--max-projects-per-agent", type=int, default=6)
     parser.add_argument("--max-agent-age", type=int, default=750)
@@ -1300,8 +1301,8 @@ if __name__ == "__main__":
     parser.add_argument(
         "--info-action",
         action="store_true",
-        default=True,
-        help="Periodically prints the chosen action of the controlled agent (enabled by default).",
+        default=False,
+        help="Periodically prints the chosen action of the controlled agent (not enabled by default).",
     )
     parser.add_argument(
         "--no-info-action",
