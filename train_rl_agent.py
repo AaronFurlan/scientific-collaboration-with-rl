@@ -924,9 +924,15 @@ def main(
         config = _set_rollout_workers_compat(config, num_workers=1)
         config = config.evaluation(evaluation_num_env_runners=0)
     else:
-        config = _set_rollout_workers_compat(config, num_workers=10)
+        # Each worker runs its own environment and collects samples in parallel.
+        # With 10 workers, 4000 steps batch size, each worker collects 400 steps.
+        # This fits well within the 600s timeout even if steps are slow.
+        config = _set_rollout_workers_compat(config, num_workers=8)
 
     # Rebuild the algorithm with evaluation enabled
+    config = config.env_runners(
+        rollout_fragment_length="auto",  # RLlib automatically sets this based on batch size and workers
+    )
     algo_instance = config.build_algo()
 
     history = []
@@ -1317,7 +1323,7 @@ if __name__ == "__main__":
         help="Print the controlled agent's action every N env steps within an episode.",
     )
 
-    parser.add_argument("--train-batch-size", type=int, default=32000,
+    parser.add_argument("--train-batch-size", type=int, default=8000,
                         help="Number of env steps collected per training iteration.")
 
     parser.add_argument("--save-every-n-iters", type=int, default=50,
