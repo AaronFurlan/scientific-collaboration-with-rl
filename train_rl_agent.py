@@ -36,6 +36,8 @@ import csv
 import wandb
 import ray
 import matplotlib.pyplot as plt
+import matplotlib
+matplotlib.use("Agg")
 import numpy as np
 import torch
 
@@ -652,6 +654,14 @@ def main(
     # Profiling overrides
     num_workers: Optional[int] = None,
     evaluation_interval: Optional[int] = None,
+    # RL training hyperparameters
+    gamma: float = 0.99,
+    lambda_: float = 0.95,
+    lr: float = 1e-4,
+    num_epochs: int = 8,
+    entropy_coeff: float = 0.01,
+    vf_loss_coeff: float = 1.0,
+    grad_clip: float = 0.5,
 ):
 
     # Seed all RNGs (random, numpy, torch, cuda) for reproducibility
@@ -733,6 +743,15 @@ def main(
                 "train_batch_size": train_batch_size,
                 "num_workers": num_workers,
                 "rollout_fragment_length": "auto",
+                "training": {
+                    "gamma": gamma,
+                    "lambda": lambda_,
+                    "lr": lr,
+                    "num_epochs": num_epochs,
+                    "entropy_coeff": entropy_coeff,
+                    "vf_loss_coeff": vf_loss_coeff,
+                    "grad_clip": grad_clip,
+                },
                 "env": {
                     "n_agents": n_agents,
                     "start_agents": start_agents,
@@ -763,7 +782,7 @@ def main(
                 "config": wandb_config,
                 "name": run_name,
                 "mode": wandb_mode,
-                "settings": wandb.Settings(silent=True, console="off", request_timeout=60)
+                "settings": wandb.Settings(silent=True, console="off")
             }
             if wandb_entity:
                 init_kwargs["entity"] = wandb_entity
@@ -839,14 +858,14 @@ def main(
             .framework(framework)
             .training(
                 train_batch_size=train_batch_size,
-                gamma=0.99,
-                lambda_=0.95,
+                gamma=gamma,
+                lambda_=lambda_,
                 minibatch_size=min(512, train_batch_size),
-                num_epochs=8,
-                lr=1e-4,
-                grad_clip=0.5,
-                entropy_coeff=0.01,
-                vf_loss_coeff=1.0,
+                num_epochs=num_epochs,
+                lr=lr,
+                grad_clip=grad_clip,
+                entropy_coeff=entropy_coeff,
+                vf_loss_coeff=vf_loss_coeff,
                 vf_clip_param=5.0,
                 model={
                     "fcnet_hiddens": [256, 256],
@@ -881,11 +900,11 @@ def main(
             .framework(framework)
             .training(
                 train_batch_size=train_batch_size,
-                gamma=0.99,
-                lr=1e-4,
-                grad_clip=0.5,
-                entropy_coeff=0.01,
-                vf_loss_coeff=1.0,
+                gamma=gamma,
+                lr=lr,
+                grad_clip=grad_clip,
+                entropy_coeff=entropy_coeff,
+                vf_loss_coeff=vf_loss_coeff,
                 model={
                     "fcnet_hiddens": [256, 256],
                     "fcnet_activation": "tanh",
@@ -973,6 +992,7 @@ def main(
     last_checkpoint_path: Optional[str] = None
 
     prev_total_env_steps = 0
+    recent_returns = []
 
     try:
         print(f"\n=== {algo.upper()} TRAINING (single controlled agent) with evaluation ===")
@@ -999,6 +1019,16 @@ def main(
             raw_train_return = metrics.get("train/episode_return_mean")
             eval_return_val = _safe_float(raw_eval_return)
             train_return_val = _safe_float(raw_train_return)
+
+            if not math.isnan(train_return_val):
+                recent_returns.append(train_return_val)
+            
+            # Compute rolling mean over the last 10 iterations
+            # and log every 10 iterations.
+            mean_return_10 = float("nan")
+            if (i + 1) % 10 == 0 and len(recent_returns) > 0:
+                subset = recent_returns[-10:]
+                mean_return_10 = sum(subset) / len(subset)
 
             has_valid_eval = not math.isnan(eval_return_val)
             has_valid_train = not math.isnan(train_return_val)
@@ -1127,6 +1157,10 @@ def main(
                     step = int(raw_step)
 
                     log_dict = wandb_sanitize(metrics)
+                    # Log rolling mean if available
+                    if not math.isnan(mean_return_10):
+                        log_dict["train/mean_return_10"] = mean_return_10
+
                     # Mark first iteration as connectivity check
                     if i == 0:
                         log_dict["debug/it_works"] = 1
@@ -1157,29 +1191,23 @@ def main(
         algo_instance.stop()
         ray.shutdown()
 
-        # Upload best checkpoint as artifact if available (final, deduplicated)
-        if use_wandb and best_checkpoint_path is not None:
-            try:
-                artifact = wandb.Artifact(
-                    name=f"{algo.lower()}-best-{policy_config_name}-s{seed}",
-                    type="model",
-                )
-                if os.path.isdir(best_checkpoint_path):
-                    artifact.add_dir(best_checkpoint_path)
-                elif os.path.isfile(best_checkpoint_path):
-                    artifact.add_file(best_checkpoint_path)
-                wandb.log_artifact(artifact)
-            except Exception as e:
-                print(f"[checkpoint] WARNING: final wandb artifact upload failed: {e}")
-
-        if use_wandb and wandb_run is not None:
-            try:
-                wandb.finish()
-            except Exception as e:
-                print(f"wandb.finish() failed: {e}")
-
     # Persist training history to CSV and plot (if matplotlib is available)
     results_paths = plot_training_history(history, save_prefix=f"{algo.lower()}_history_{policy_config_name}_{seed}")
+
+    # Upload best checkpoint as artifact if available (final, deduplicated)
+    if use_wandb and best_checkpoint_path is not None:
+        try:
+            artifact = wandb.Artifact(
+                name=f"{algo.lower()}-best-{policy_config_name}-s{seed}",
+                type="model",
+            )
+            if os.path.isdir(best_checkpoint_path):
+                artifact.add_dir(best_checkpoint_path)
+            elif os.path.isfile(best_checkpoint_path):
+                artifact.add_file(best_checkpoint_path)
+            wandb.log_artifact(artifact)
+        except Exception as e:
+            print(f"[checkpoint] WARNING: final wandb artifact upload failed: {e}")
 
     # Optionally log CSV/PNG as artifacts/files in wandb
     if use_wandb and results_paths:
@@ -1192,6 +1220,22 @@ def main(
                 wandb.save(png_path)
         except Exception as e:
             print(f"wandb save of history artifacts failed: {e}")
+
+    if use_wandb:
+        try:
+            # Final log of the mean over the last 10 iterations (or all if < 10)
+            if len(recent_returns) > 0:
+                subset = recent_returns[-10:]
+                final_mean_return = sum(subset) / len(subset)
+                # Use the last known global step or iteration index for final logging
+                last_step = i
+                if 'result' in locals():
+                    last_step = result.get("timesteps_total") or i
+                wandb.log({"train/final_mean_return": final_mean_return}, step=int(last_step))
+
+            wandb.finish()
+        except Exception as e:
+            print(f"wandb.finish() failed: {e}")
 
 
 def plot_training_history(history: list, out_dir: str = "results", save_prefix: str = "ppo_history"):
@@ -1352,6 +1396,15 @@ if __name__ == "__main__":
     parser.add_argument("--save-every-n-iters", type=int, default=50,
                         help="Save a periodic checkpoint every N iterations (0 = disabled).")
 
+    # RL training hyperparameters
+    parser.add_argument("--gamma", type=float, default=0.99)
+    parser.add_argument("--lambda", dest="lambda_", type=float, default=0.95)
+    parser.add_argument("--lr", type=float, default=1e-4)
+    parser.add_argument("--num-epochs", type=int, default=8)
+    parser.add_argument("--entropy-coeff", type=float, default=0.01)
+    parser.add_argument("--vf-loss-coeff", type=float, default=1.0)
+    parser.add_argument("--grad-clip", type=float, default=0.5)
+
     args = parser.parse_args()
 
     main(
@@ -1386,4 +1439,11 @@ if __name__ == "__main__":
         info_intervall=args.info_intervall,
         train_batch_size=args.train_batch_size,
         save_every_n_iters=args.save_every_n_iters,
+        gamma=args.gamma,
+        lambda_=args.lambda_,
+        lr=args.lr,
+        num_epochs=args.num_epochs,
+        entropy_coeff=args.entropy_coeff,
+        vf_loss_coeff=args.vf_loss_coeff,
+        grad_clip=args.grad_clip,
     )
