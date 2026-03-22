@@ -44,14 +44,16 @@ def profile_iteration_time():
     }
 
     test_scenarios = [
-        {"name": "Baseline", "params": {}},
-        {"name": "n_agents", "params": {"n_agents": 110}},
+        {"name": "Baseline", "params": {"n_agents": 100, "max_peer_group_size": 10, "train_batch_size": 4000, "max_steps": 600, "n_groups": 50, "num_workers": 8, "evaluation_interval": 0}},
+        {"name": "n_agents and peer_group_size", "params": {"n_agents": 2000, "max_peer_group_size": 40}},
+        {"name": "n_agents and n_groups", "params": {"n_agents": 2000, "n_groups": 200}},
         {"name": "max_peer_group_size", "params": {"max_peer_group_size": 20}},
-        {"name": "train_batch_size", "params": {"train_batch_size": 4010}},
-        {"name": "max_steps", "params": {"max_steps": 210}},
-        {"name": "n_groups", "params": {"n_groups": 30}},
-        {"name": "num_workers", "params": {"num_workers": 5}},
-        {"name": "evaluation_interval", "params": {"evaluation_interval": 2}},
+        {"name": "train_batch_size 18'000", "params": {"train_batch_size": 18000}},
+        {"name": "train_batch_size 32'000", "params": {"train_batch_size": 32000}},
+        {"name": "max_steps", "params": {"max_steps": 700}},
+        {"name": "n_groups", "params": {"n_groups": 8}},
+        {"name": "num_workers", "params": {"num_workers": 10}},
+        {"name": "evaluation_interval", "params": {"evaluation_interval": 1}},
     ]
 
     results = []
