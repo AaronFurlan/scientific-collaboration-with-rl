@@ -33,6 +33,7 @@ import argparse
 import math
 import os
 import csv
+import json
 import wandb
 import ray
 import matplotlib.pyplot as plt
@@ -702,6 +703,43 @@ def main(
             "Solution: Increase n_groups, decrease n_agents, or increase max_peer_group_size (if < 13)."
         )
 
+    # ------------------------------------------------------------------
+    # Prepare training config for persistence
+    # ------------------------------------------------------------------
+    train_config = {
+        "algo": algo,
+        "iterations": iterations,
+        "framework": framework,
+        "policy_config_name": policy_config_name,
+        "group_policy_homogenous": group_policy_homogenous,
+        "seed": seed,
+        "n_agents": n_agents,
+        "start_agents": start_agents,
+        "max_steps": max_steps,
+        "max_rewardless_steps": max_rewardless_steps,
+        "n_groups": n_groups,
+        "max_peer_group_size": max_peer_group_size,
+        "n_projects_per_step": n_projects_per_step,
+        "max_projects_per_agent": max_projects_per_agent,
+        "max_agent_age": max_agent_age,
+        "acceptance_threshold": acceptance_threshold,
+        "reward_function": reward_function,
+        "prestige_threshold": prestige_threshold,
+        "novelty_threshold": novelty_threshold,
+        "effort_threshold": effort_threshold,
+        "controlled_agent_id": controlled_agent_id,
+        "topk_collab": topk_collab,
+        "topk_apply_to_all_agents": topk_apply_to_all_agents,
+        "train_batch_size": train_batch_size,
+        "gamma": gamma,
+        "lambda_": lambda_,
+        "lr": lr,
+        "num_epochs": num_epochs,
+        "entropy_coeff": entropy_coeff,
+        "vf_loss_coeff": vf_loss_coeff,
+        "grad_clip": grad_clip,
+    }
+
     # 1) Ray init (robust, begrenzte Ressourcen)
     ray.init(
         ignore_reinit_error=True,
@@ -728,7 +766,7 @@ def main(
             # Build a flat config dict for wandb
             # Since some values are defined later in the script (workers, rollout_length),
             # we use the arguments/locals to build the config.
-            num_workers = 1 if info_action else 8
+            num_workers = 1 if info_action else 10
 
             wandb_config: Dict[str, Any] = {
                 "algo": algo,
@@ -973,8 +1011,7 @@ def main(
     else:
         # Each worker runs its own environment and collects samples in parallel.
         # With 10 workers, 4000 steps batch size, each worker collects 400 steps.
-        # This fits well within the 600s timeout even if steps are slow.
-        _num_workers = 8
+        _num_workers = 10
         config = _set_rollout_workers_compat(config, num_workers=_num_workers)
 
     # Rebuild the algorithm with evaluation enabled
@@ -1083,6 +1120,9 @@ def main(
                     )
                     os.makedirs(chkpt_dir, exist_ok=True)
                     algo_instance.save_checkpoint(chkpt_dir)
+                    # Save config as json in the checkpoint folder
+                    with open(os.path.join(chkpt_dir, "config.json"), "w") as f:
+                        json.dump(train_config, f, indent=4)
                     best_checkpoint_path = chkpt_dir
                     checkpoint_info += " | [Checkpoint saved] best"
                 except Exception as e:
@@ -1123,6 +1163,9 @@ def main(
                     )
                     os.makedirs(chkpt_dir, exist_ok=True)
                     algo_instance.save_checkpoint(chkpt_dir)
+                    # Save config as json in the checkpoint folder
+                    with open(os.path.join(chkpt_dir, "config.json"), "w") as f:
+                        json.dump(train_config, f, indent=4)
                     last_checkpoint_path = chkpt_dir
                     checkpoint_info += " | [Checkpoint saved] periodic"
                 except Exception as e:
@@ -1333,7 +1376,7 @@ if __name__ == "__main__":
     parser.add_argument("--max-steps", type=int, default=600)
     parser.add_argument("--max-rewardless-steps", type=int, default=500)
     parser.add_argument("--n-groups", type=int, default=50)
-    parser.add_argument("--max-peer-group-size", type=int, default=40)  # keep small!
+    parser.add_argument("--max-peer-group-size", type=int, default=40)
     parser.add_argument("--n-projects-per-step", type=int, default=1)
     parser.add_argument("--max-projects-per-agent", type=int, default=6)
     parser.add_argument("--max-agent-age", type=int, default=750)
@@ -1393,15 +1436,15 @@ if __name__ == "__main__":
     parser.add_argument("--train-batch-size", type=int, default=8000,
                         help="Number of env steps collected per training iteration.")
 
-    parser.add_argument("--save-every-n-iters", type=int, default=50,
+    parser.add_argument("--save-every-n-iters", type=int, default=5,
                         help="Save a periodic checkpoint every N iterations (0 = disabled).")
 
     # RL training hyperparameters
     parser.add_argument("--gamma", type=float, default=0.99)
-    parser.add_argument("--lambda", dest="lambda_", type=float, default=0.95)
+    parser.add_argument("--lambda", dest="lambda_", type=float, default=1)
     parser.add_argument("--lr", type=float, default=1e-4)
-    parser.add_argument("--num-epochs", type=int, default=8)
-    parser.add_argument("--entropy-coeff", type=float, default=0.01)
+    parser.add_argument("--num-epochs", type=int, default=15)
+    parser.add_argument("--entropy-coeff", type=float, default=0.001)
     parser.add_argument("--vf-loss-coeff", type=float, default=1.0)
     parser.add_argument("--grad-clip", type=float, default=0.5)
 

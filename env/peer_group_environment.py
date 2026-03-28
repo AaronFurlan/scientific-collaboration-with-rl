@@ -267,7 +267,9 @@ class PeerGroupEnvironment(ParallelEnv):
             idx = self.agent_active_projects[agent].index(proj_id)
             self.agent_active_projects[agent][idx] = None
         except ValueError:
-            pass
+            # debugging
+            print(f"Failed to remove project {proj_id} for agent {agent}")
+            # pass
 
     def reset(
         self, seed: Optional[int] = None, options: Optional[Dict[str, Any]] = None
@@ -443,7 +445,7 @@ class PeerGroupEnvironment(ParallelEnv):
 
                 if len(collaborators) > 1:
                     running_project_idx = self._start_open_project(
-                        project_idx, peer_group[collaborators]
+                        project_idx, peer_group[collaborators].tolist() # tolist, else np.array to contributors
                     )
                     grouped_collaborators |= set(collaborators)
 
@@ -463,6 +465,8 @@ class PeerGroupEnvironment(ParallelEnv):
     def _start_open_project(
         self, project_idx: int, contributors: List[int]
     ) -> Optional[str]:
+        contributors = np.atleast_1d(contributors).flatten().tolist() # To resolve a bug, that index of contributors are np.array
+        contributors = [int(c) for c in contributors]
         project_id = f"project_{len(self.projects)}-{project_idx}-{self.timestep}"
         suffix = [str(project_idx), str(self.timestep)]
         ## if the project was already added make sure all the contributors are there.
@@ -483,8 +487,9 @@ class PeerGroupEnvironment(ParallelEnv):
         new_running_proj["contributors"] = contributors
         new_running_proj["peer_fit"] = {i: 0 for i in contributors}
         for contributor in contributors:
-            self._add_active_project(contributor, new_running_proj["id"])
-            self.agent_project_effort[contributor][new_running_proj["id"]] = 0
+            if new_running_proj["id"] not in self._get_active_projects(contributor): # Only add Project if not already active
+                self._add_active_project(contributor, new_running_proj["id"])
+                self.agent_project_effort[contributor][new_running_proj["id"]] = 0
         proj_object = Project.from_dict(new_running_proj, rng=self.rng)
         proj_object.kene = self._locate_project_in_plane(proj_object)
         proj_object.peer_fit = [
@@ -771,13 +776,6 @@ class PeerGroupEnvironment(ParallelEnv):
                     collaborators_intents = (
                         collaborators_intents & collaborators_intents.T
                     )
-
-                    # Pass ALL agents who chose this project to _find_project_setting.
-                    # That method already handles: (a) collaborative clique-finding for
-                    # agents with mutual edges, and (b) solo-project fallback for
-                    # agents without mutual matches.  The previous filter here
-                    # (used values as indices for np.delete) would
-                    # systematically remove solo agents.
                     self._find_project_setting(
                         choice, collaborator_group, collaborators_intents
                     )

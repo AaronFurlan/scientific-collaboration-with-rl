@@ -18,7 +18,7 @@ Architecture:
 
 Usage:
     python run_policy_simulation_with_rlagent.py
-    python run_policy_simulation_with_rlagent.py --checkpoint models/ --seed 42
+    python run_policy_simulation_with_rlagent.py --checkpoint checkpoints/ --seed 42
     python run_policy_simulation_with_rlagent.py --policy-config Balanced --reward-function by_effort
 """
 
@@ -75,20 +75,21 @@ class EvalConfig:
     """
 
     # Checkpoint
-    checkpoint_path: str = "models"
+    checkpoint_path: str = "checkpoints"
 
     # Environment  [must-match-training]
-    n_agents: int = 64
-    start_agents: int = 60
-    max_steps: int = 500
-    max_rewardless_steps: int = 500
-    n_groups: int = 8
-    max_peer_group_size: int = 8       # ← macro-action size depends on this
-    n_projects_per_step: int = 1
-    max_projects_per_agent: int = 6
-    max_agent_age: int = 750
-    acceptance_threshold: float = 0.5
-    reward_function: str = "by_effort"
+    # We use None as default to force sync from checkpoint if not provided via CLI
+    n_agents: Optional[int] = None
+    start_agents: Optional[int] = None
+    max_steps: Optional[int] = None
+    max_rewardless_steps: Optional[int] = None
+    n_groups: Optional[int] = None
+    max_peer_group_size: Optional[int] = None       # ← macro-action size depends on this
+    n_projects_per_step: Optional[int] = None
+    max_projects_per_agent: Optional[int] = None
+    max_agent_age: Optional[int] = None
+    acceptance_threshold: Optional[float] = None
+    reward_function: Optional[str] = None
 
     # Heuristic thresholds  [must-match-training]
     prestige_threshold: float = 0.2
@@ -148,25 +149,75 @@ class EvalConfig:
         print(f"  output_prefix:       {self.output_file_prefix}")
         print(f"{'='*60}\n")
 
+    def update_from_algorithm_config(self, algo_config: dict) -> None:
+        """Automatically update environment parameters from a loaded RLlib algorithm config or config.json."""
+        env_cfg = algo_config.get("env_config", algo_config)
+        if not env_cfg:
+            print("⚠️ No env_config found in algorithm state. Using CLI/default values.")
+            return
+
+        print("\n🔄 Synchronisierung der Umgebungsparameter aus dem Checkpoint:")
+        
+        mapping = {
+            "n_agents": "n_agents",
+            "start_agents": "start_agents",
+            "max_steps": "max_steps",
+            "max_rewardless_steps": "max_rewardless_steps",
+            "n_groups": "n_groups",
+            "max_peer_group_size": "max_peer_group_size",
+            "n_projects_per_step": "n_projects_per_step",
+            "max_projects_per_agent": "max_projects_per_agent",
+            "max_agent_age": "max_agent_age",
+            "acceptance_threshold": "acceptance_threshold",
+            "reward_function": "reward_function",
+            "reward_mode": "reward_function", # alternative key in some configs
+            "topk_collab": "topk_collab",
+            "topk_apply_to_all_agents": "topk_apply_to_all_agents",
+            "policy_config_name": "policy_config_name",
+            "prestige_threshold": "prestige_threshold",
+            "novelty_threshold": "novelty_threshold",
+            "effort_threshold": "effort_threshold",
+            "group_policy_homogenous": "group_policy_homogenous",
+        }
+
+        updated = []
+        for env_key, attr_name in mapping.items():
+            if env_key in env_cfg:
+                val = env_cfg[env_key]
+                old_val = getattr(self, attr_name)
+                if val != old_val:
+                    setattr(self, attr_name, val)
+                    updated.append(f"{attr_name}: {old_val} -> {val}")
+
+        if updated:
+            for line in updated:
+                print(f"  [Sync] {line}")
+        else:
+            print("  Alle Parameter im Checkpoint stimmen mit der aktuellen Konfiguration überein.")
+        print("")
+
 
 # ---------------------------------------------------------------------------
 # Reusable builder helpers — eliminate duplication
 # ---------------------------------------------------------------------------
 
 def build_env(cfg: EvalConfig) -> PeerGroupEnvironment:
-    """Create a raw PeerGroupEnvironment from config."""
+    """Create a raw PeerGroupEnvironment from config.
+    
+    Uses defaults if some values are still None after sync.
+    """
     return PeerGroupEnvironment(
-        start_agents=cfg.start_agents,
-        max_agents=cfg.n_agents,
-        max_steps=cfg.max_steps,
-        n_groups=cfg.n_groups,
-        max_peer_group_size=cfg.max_peer_group_size,
-        n_projects_per_step=cfg.n_projects_per_step,
-        max_projects_per_agent=cfg.max_projects_per_agent,
-        max_agent_age=cfg.max_agent_age,
-        max_rewardless_steps=cfg.max_rewardless_steps,
-        acceptance_threshold=cfg.acceptance_threshold,
-        reward_mode=cfg.reward_function,
+        start_agents=cfg.start_agents or 30,
+        max_agents=cfg.n_agents or 64,
+        max_steps=cfg.max_steps or 500,
+        n_groups=cfg.n_groups or 8,
+        max_peer_group_size=cfg.max_peer_group_size or 8,
+        n_projects_per_step=cfg.n_projects_per_step or 1,
+        max_projects_per_agent=cfg.max_projects_per_agent or 6,
+        max_agent_age=cfg.max_agent_age or 750,
+        max_rewardless_steps=cfg.max_rewardless_steps or 500,
+        acceptance_threshold=cfg.acceptance_threshold or 0.5,
+        reward_mode=cfg.reward_function or "by_effort",
     )
 
 
@@ -273,19 +324,14 @@ def make_env_creator_from_config(cfg: EvalConfig) -> Callable:
 # ---------------------------------------------------------------------------
 
 def compute_rl_action(
-    rl_module: torch.nn.Module,
+    model: torch.nn.Module,
     obs_vec: np.ndarray,
     deterministic: bool,
 ) -> int:
     """Compute a discrete macro-action ID from a flattened observation vector.
 
-    Uses the RLModule's forward_inference() — the recommended new-API-stack
-    approach for checkpoint-restored algorithms. This is safer than
-    algo.compute_single_action() which is deprecated on the new API stack
-    and fails with 'SingleAgentEnvRunner has no attribute get_policy'.
-
     Args:
-        rl_module: The RLModule obtained via algo.get_module().
+        model: The RL model obtained via algo.get_policy().model.
         obs_vec: 1-D float32 numpy array (flattened observation + action mask).
         deterministic: If True, take the argmax (greedy). Otherwise sample.
 
@@ -294,9 +340,9 @@ def compute_rl_action(
     """
     obs_tensor = torch.from_numpy(obs_vec).unsqueeze(0).float()
     with torch.no_grad():
-        fwd_out = rl_module.forward_inference({"obs": obs_tensor})
-    logits = fwd_out["action_dist_inputs"]
-
+        # TorchModelV2 expects a dict with "obs" and returns (logits, state)
+        logits, _ = model({"obs": obs_tensor})
+    
     if deterministic:
         return int(torch.argmax(logits, dim=-1).item())
     else:
@@ -424,28 +470,81 @@ def run_simulation_with_rl_agent(cfg: EvalConfig) -> dict:
         logging_level="WARNING",
     )
 
+    # Register env BEFORE restoration so RLlib knows how to reconstruct it.
+    # We use a dummy registration first to satisfy Algorithm.from_checkpoint().
+    # RLlib needs to know about the environment name and have a creator that
+    # provides the correct observation and action spaces.
     env_name = "peer_group_single_agent_fixed_population"
+
+    # To avoid "size mismatch" errors during from_checkpoint(), we try to 
+    # extract the environment configuration from the checkpoint's algorithm_state.pkl
+    # or the new config.json if it exists, before we register the environment.
+    checkpoint_path = os.path.abspath(cfg.checkpoint_path)
+
+    if not os.path.exists(checkpoint_path):
+        # Check if it's a relative path from the checkpoints folder
+        alt_path = os.path.join("checkpoints", cfg.checkpoint_path)
+        if os.path.exists(alt_path):
+            checkpoint_path = os.path.abspath(alt_path)
+        else:
+            raise ValueError(f"Checkpoint path not found: {checkpoint_path}")
+
+    # Prioritize config.json if available (explicitly requested by user)
+    config_json = os.path.join(checkpoint_path, "config.json")
+    if os.path.exists(config_json):
+        try:
+            with open(config_json, "r") as f:
+                config_data = json.load(f)
+            print(f"\n📄 Loading configuration from {config_json}")
+            cfg.update_from_algorithm_config(config_data)
+        except Exception as e:
+            print(f"⚠️ Could not load config from {config_json}: {e}")
+
+    state_file = os.path.join(checkpoint_path, "algorithm_state.pkl")
+    if os.path.exists(state_file):
+        try:
+            import pickle
+            with open(state_file, "rb") as f:
+                state = pickle.load(f)
+            # RLlib stores the config in the state
+            if "config" in state:
+                # Some RLlib versions store it as a dict, others as a Config object
+                config_to_sync = state["config"]
+                if hasattr(config_to_sync, "to_dict"):
+                    config_to_sync = config_to_sync.to_dict()
+                cfg.update_from_algorithm_config(config_to_sync)
+        except Exception as e:
+            print(f"⚠️ Could not pre-sync config from {state_file}: {e}")
+
     tune.register_env(env_name, make_env_creator_from_config(cfg))
 
     # ---- 2) Restore trained algorithm from checkpoint ----
-    checkpoint_path = os.path.abspath(cfg.checkpoint_path)
     print(f"Restoring algorithm from checkpoint: {checkpoint_path}")
     algo = Algorithm.from_checkpoint(checkpoint_path)
     print("Algorithm restored successfully.")
 
+    # ---- 2.5) Sync Environment Config from Checkpoint (Full Sync) ----
+    # This ensures that n_agents, max_peer_group_size etc. match the training run.
+    cfg.update_from_algorithm_config(algo.config.to_dict())
+
+    # Now that all synchronizations are complete, print the FINAL configuration
+    print("\n✅ FINAL EVALUATION CONFIG (after synchronization):")
+    cfg.print_summary()
+
+    # ---- 3) Build evaluation environment ----
+    # Re-registering after sync if the env creator needs synced parameters for internal RLlib use,
+    # though our manual simulation (Step 6) uses build_env(cfg) directly.
+    tune.register_env(env_name, make_env_creator_from_config(cfg))
+
     # Get the RLModule for inference.
-    # Why forward_inference() instead of algo.compute_single_action()?
-    #   - compute_single_action() is deprecated on the new RLlib API stack
-    #     and raises AttributeError ('SingleAgentEnvRunner' has no 'get_policy').
-    #   - forward_inference() is the officially recommended replacement:
-    #     it runs the neural network in eval mode without connectors/exploration
-    #     overhead, and returns raw logits we can decode ourselves.
-    #   - This also gives us explicit control over deterministic vs stochastic
-    #     action selection (argmax vs sampling from the logit distribution).
-    rl_module = algo.get_module()
+    # Why algo.get_policy().model instead of algo.get_module()?
+    #   - We are on the OLD API stack (enable_rl_module_and_learner=False).
+    #   - On the old stack, algo.get_module() fails because the workers are RolloutWorkers, not EnvRunners.
+    #   - algo.get_policy().model gives us the TorchModelV2 which we can use for inference.
+    policy = algo.get_policy()
+    rl_module = policy.model
     rl_module.eval()
 
-    # ---- 3) Build evaluation environment & population ----
     env = build_env(cfg)
     agent_policies = build_heuristic_population(cfg)
 
@@ -641,8 +740,8 @@ def parse_args() -> EvalConfig:
 
     # Checkpoint
     parser.add_argument(
-        "--checkpoint", type=str, default="models",
-        help="Path to the RLlib checkpoint directory (default: models/)",
+        "--checkpoint", type=str, default="checkpoints",
+        help="Path to the RLlib checkpoint directory (default: checkpoints/)",
     )
 
     # Policy config
@@ -657,20 +756,20 @@ def parse_args() -> EvalConfig:
     )
 
     # Env knobs (defaults match train_ppo_rllib.py)
-    parser.add_argument("--n-agents", type=int, default=64)
-    parser.add_argument("--start-agents", type=int, default=30)
-    parser.add_argument("--max-steps", type=int, default=500)
-    parser.add_argument("--max-rewardless-steps", type=int, default=500)
-    parser.add_argument("--n-groups", type=int, default=8)
-    parser.add_argument("--max-peer-group-size", type=int, default=8)
-    parser.add_argument("--n-projects-per-step", type=int, default=1)
-    parser.add_argument("--max-projects-per-agent", type=int, default=6)
-    parser.add_argument("--max-agent-age", type=int, default=750)
+    parser.add_argument("--n-agents", type=int, default=None)
+    parser.add_argument("--start-agents", type=int, default=None)
+    parser.add_argument("--max-steps", type=int, default=None)
+    parser.add_argument("--max-rewardless-steps", type=int, default=None)
+    parser.add_argument("--n-groups", type=int, default=None)
+    parser.add_argument("--max-peer-group-size", type=int, default=None)
+    parser.add_argument("--n-projects-per-step", type=int, default=None)
+    parser.add_argument("--max-projects-per-agent", type=int, default=None)
+    parser.add_argument("--max-agent-age", type=int, default=None)
 
     # Reward & thresholds
-    parser.add_argument("--acceptance-threshold", type=float, default=0.5)
+    parser.add_argument("--acceptance-threshold", type=float, default=None)
     parser.add_argument(
-        "--reward-function", type=str, default="by_effort",
+        "--reward-function", type=str, default=None,
         choices=["multiply", "evenly", "by_effort"],
     )
     parser.add_argument("--prestige-threshold", type=float, default=0.2)
@@ -771,5 +870,5 @@ if __name__ == "__main__":
             print(f"\n--- Run {i+1}/{num_seeds} | Seed: {current_seed} | Reward: {reward_fn} ---")
             run_simulation_with_rl_agent(config)
 
-    print("\n✅ Evaluation batch completed.")
+    print("\nEvaluation batch completed.")
 
