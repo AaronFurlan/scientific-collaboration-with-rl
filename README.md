@@ -68,11 +68,31 @@ Run `visualizations.ipynb`to reproduce the figures.
 - JSONL logs can be large; use `jq`, `tail -f`, or sample lines.
 - Commit parameter changes alongside their `*_summary.json` for reproducibility.
 
-## Run the Simulation with RL agent (agent_0)
-Runs the simulation with a PPO agent (agent0) and a fixed seed.
+## Run rl agent training with Ray RLlib
+Supported algorithms: `PPO`, `APPO`, `DREAMERV3`.
+
 ```bash
-python train_ppo_rllib.py
+# Default: PPO
+python train_rl_agent.py
+
+# Using APPO
+python train_rl_agent.py --algo APPO
+
+# Using DreamerV3 (requires more resources, GPU recommended)
+python train_rl_agent.py --algo DREAMERV3
 ```
+## Run the simulation with a trained RL agent
+```bash
+python run_policiy_simulation_with_rl_agent.py `
+  --checkpoint "checkpoints\09-04-2026\balanced_by_effort_iter0019_mrl50_09-04-01-52_eval4.87_best" `
+  --seed 101 `
+  --num-seeds 10 `
+  --all-rewards
+```
+- `--checkpoint`: Path to the checkpoint directory containing the trained RL agent model. The checkpoint directory should contain the necessary files for loading the model, such as the model weights and configuration.
+- `--seed`: Starting seed for the simulation.
+- `--num-seeds`: Number of seeds to run the simulation with. Each seed will have a different random seed for reproducibility.
+- `--all-rewards`: If set, the script will print all rewards for each episode instead of just the final reward.
 
 ## Overleaf workflow
 - After writing in Overleaf pull the latest version from Overleaf with `git subtree pull --prefix thesis overleaf OVERLEAF_BRANCH --squash`

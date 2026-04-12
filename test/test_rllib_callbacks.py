@@ -27,14 +27,13 @@ callbacks/papers_metrics_callback.py – PapersMetricsCallback:
 
 from __future__ import annotations
 
-from types import SimpleNamespace
-from typing import Any, Dict, Optional
-from unittest.mock import MagicMock, call
+from typing import Dict, Optional
+from unittest.mock import MagicMock
 
 import numpy as np
 import pytest
 
-from rllib_callbacks import EpisodeMetricsCallback
+from callbacks.rllib_callbacks import EpisodeMetricsCallback
 from callbacks.debug_actions_callback import MacroActionDecoder, make_action_info_callback
 from callbacks.papers_metrics_callback import PapersMetricsCallback
 

@@ -110,7 +110,7 @@ def run_simulation_with_policies(
     stats = SimulationStats()
 
     log = SimLog(
-        "log",
+        "../log",
         f"{output_file_prefix}_actions.jsonl",
         f"{output_file_prefix}_observations.jsonl",
         f"{output_file_prefix}_projects.json",
