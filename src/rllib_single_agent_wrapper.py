@@ -1,39 +1,27 @@
 """
 rllib_single_agent_wrapper.py
 
-Single-agent Gymnasium wrapper around a PettingZoo ParallelEnv (PeerGroupEnvironment) that:
+Single-agent Gymnasium wrapper around a PettingZoo ParallelEnv that:
 
-1) Flattens nested observations (including action_mask) into a single 1D Box(float32)
-   -> RLlib can use standard encoders.
+1) Exposes one controlled agent through a standard Gymnasium API.
+2) Uses a multi-head Dict action space:
+   {"choose_project": Discrete, "put_effort": Discrete, "collaborate_with": Box}
+3) Decodes and repairs actions using the env-provided action masks.
+4) Supports fixed policies for all non-controlled agents.
+5) Optionally applies a top-k collaboration ablation.
+6) Flattens nested observations into a stable 1D float32 vector for RLlib.
+7) Re-encodes running project slots into a compact, slot-stable representation.
 
-2) Flattens the env's Dict action-space into ONE Discrete macro-action
-   -> PPO can output a simple categorical distribution.
+Observation design for running project slots:
+- explicit activity flag (`is_active`)
+- progress features (`current_effort`, `remaining_effort`, `progress_ratio`)
+- urgency features (`time_left`, `urgency`)
+- project quality features (`prestige`, `novelty`, optional `societal_value`)
+- summarized collaboration features instead of raw peer vectors
+- explicit slot identity features (`slot_index`, normalized index, one-hot)
 
-3) Decodes the macro-action back into the env's expected dict action:
-   {"choose_project": int, "collaborate_with": np.ndarray[int8], "put_effort": int}
-
-4) Repairs (clips) invalid decoded actions using the env-provided action_mask
-   -> prevents invalid actions from breaking env logic.
-
-5) Supports fixed policies for non-controlled agents via `other_policies`.
-   `other_policies[agent_id]` must accept the nested obs:
-   {"observation": ..., "action_mask": ...} and return an env-valid action dict.
-
-6) (Optional ablation) Can enforce a top-k constraint on the "collaborate_with" bit-vector
-   using a score computed from each agent's observation (peer reputation, distance,
-   same-group bonus). This is fully implemented inside the wrapper and does NOT
-   modify the underlying environment.
-
-IMPORTANT:
-- This macro-action approach is only feasible for SMALL max_peer_group_size (e.g. <= 12).
-  Because ACTION_N = CP * PE * 2^CB.
-- If you set max_peer_group_size=100, this is impossible. Then you need a multi-head model.
-
-Key fixes vs your version:
-- BUGFIX: non-controlled agents must NOT sample env.action_space() (it's a Dict). Sample wrapper.action_space instead.
-- More robust active_agents selection: use observation keys.
-- Stable flattening using a template built from observation_space, avoids feature-order/length drift across steps.
-- Safer NumPy masking assignment to avoid view/copy surprises.
+This keeps the flattened observation size stable across steps and makes empty vs.
+active project slots semantically distinguishable.
 """
 
 from __future__ import annotations
@@ -45,13 +33,10 @@ import gymnasium as gym
 from gymnasium.spaces import Box
 
 import logging
-import sys
-import os
 
 from src.agent_policies import do_nothing_policy
 
 logger = logging.getLogger(__name__)
-
 
 NestedObs = Dict[str, Any]
 ActionDict = Dict[str, Any]
@@ -61,26 +46,26 @@ class RLLibSingleAgentWrapper(gym.Env):
     metadata = {"render.modes": ["human"]}
 
     def __init__(
-        self,
-        env,
-        controlled_agent: Optional[Union[str, Callable[[Dict[str, Any]], str]]] = None,
-        other_policies: Optional[Dict[str, Callable[[Any], Any]]] = None,
-        *,
-        force_episode_horizon: Optional[int] = None,
-        strict_space_check: bool = False,
-        # Optional top-k collaboration ablation
-        topk_collab: Optional[int] = None,
-        topk_mode: str = "score",
-        topk_seed: int = 0,
-        topk_apply_to_all_agents: bool = True,
-        w_rep: float = 1.0,
-        w_dist: float = 1.0,
-        w_same: float = 0.5,
-        info_action: bool = False,
-        info_interval: int = 50,
-        is_evaluation: bool = False,
-        debug_effort: bool = False,
-        debug_effort_agent_only: bool = True,
+            self,
+            env,
+            controlled_agent: Optional[Union[str, Callable[[Dict[str, Any]], str]]] = None,
+            other_policies: Optional[Dict[str, Callable[[Any], Any]]] = None,
+            *,
+            force_episode_horizon: Optional[int] = None,
+            strict_space_check: bool = False,
+            # Optional top-k collaboration ablation
+            topk_collab: Optional[int] = None,
+            topk_mode: str = "score",
+            topk_seed: int = 0,
+            topk_apply_to_all_agents: bool = True,
+            w_rep: float = 1.0,
+            w_dist: float = 1.0,
+            w_same: float = 0.5,
+            info_action: bool = False,
+            info_interval: int = 50,
+            is_evaluation: bool = False,
+            debug_effort: bool = False,
+            debug_effort_agent_only: bool = True,
     ):
         """Wrapper around a multi-agent env exposing a single-agent RLlib interface.
 
@@ -127,11 +112,6 @@ class RLLibSingleAgentWrapper(gym.Env):
         self.debug_effort = bool(debug_effort)
         self.debug_effort_agent_only = bool(debug_effort_agent_only)
 
-        # Logging / tracking state for controlled agent (agent_0)
-        self._effort_total_count = 0
-        self._effort_invalid_count = 0
-        self._effort_valid_count = 0
-        
         # Simple debug counters (only used if top-k is enabled)
         self._topk_calls = 0
         self._topk_pruned = 0
@@ -139,6 +119,8 @@ class RLLibSingleAgentWrapper(gym.Env):
 
         self.current_controlled: Optional[str] = None
         self._last_observations: Dict[str, Any] = {}
+
+        self.expected_obs_size = 0
 
         # Horizon enforcement
         if force_episode_horizon is None and hasattr(env, "n_steps"):
@@ -156,27 +138,21 @@ class RLLibSingleAgentWrapper(gym.Env):
 
         # ---- Multi-head action-space (Dict) ----
         # These attributes exist in your PeerGroupEnvironment
-        self._CP = int(self.env.n_projects_per_step + 1)      # choose_project
-        self._PE = int(self.env.max_projects_per_agent + 1)   # put_effort
-        self._CB = int(self.env.max_peer_group_size)          # collaborate bits (max_peer_slots)
+        self._CP = int(self.env.n_projects_per_step + 1)  # choose_project
+        self._PE = int(self.env.max_projects_per_agent + 1)  # put_effort
+        self._CB = int(self.env.max_peer_group_size)  # collaborate bits (max_peer_slots)
 
-        # Modeling discrete components as truly discrete to avoid continuous-to-discrete mismatch.
-        # This prevents the RL agent from getting 'stuck' at intermediate values (like 3)
-        # during deterministic evaluation, as the policy will now output discrete probabilities.
+        # Define discrete action spaces that match the environment
+        # RLlib will automatically create separate heads for each discrete component
+        # choose_project: Discrete(0, 1, 2, ...)
+        # put_effort: Discrete(0, 1, 2, ..., 8)
+        # collaborate_with: Box([0, 1]^CB) for continuous collaboration intent
         self.action_space = gym.spaces.Dict({
             "choose_project": gym.spaces.Discrete(self._CP),
             "put_effort": gym.spaces.Discrete(self._PE),
             "collaborate_with": gym.spaces.Box(0, 1, shape=(self._CB,), dtype=np.float32)
         })
 
-        # Internal state for slot mapping (identity mapping as requested)
-        self._slot_to_peer_index = list(range(self._CB))
-        
-        # Compatibility settings
-        self._expected_obs_size = getattr(env, "expected_obs_size", None)
-        # If passed via other_policies for some reason (older creator)
-        if self._expected_obs_size is None and isinstance(other_policies, dict) and "expected_obs_size" in other_policies:
-             self._expected_obs_size = other_policies["expected_obs_size"]
 
         # ---- Build stable observation template from env.observation_space ----
         # We need the env's observation_space(agent) which corresponds to the "observation" part.
@@ -193,87 +169,55 @@ class RLLibSingleAgentWrapper(gym.Env):
                 obs_space = None
 
         self._env_obs_space = obs_space  # may be None
-        
-        # Determine if we should include masks in the flattened vector (compatibility flag)
-        # 258 is a known size for older versions (max_peer=10, no peer_valid_mask, potentially no action_mask?)
-        # Let's check if we can detect the expected size from env_config or similar.
-        self._include_peer_valid_mask = True
-        self._include_action_mask = True
-        
+
         # Build deterministic templates for stable flattening
+        # The template is derived from observation_space and defines the full feature structure
+        # with all 8 project slots. At runtime, observations may have fewer projects (0-8),
+        # and RLlib automatically handles padding/truncating the observation vector.
+
         if obs_space is not None:
-            self._obs_template = self._zeros_from_space(obs_space)  # matches "observation" dict
+            raw_obs_template = self._zeros_from_space(obs_space)
             self._mask_template = {
                 "choose_project": np.zeros(self.env.n_projects_per_step + 1, dtype=np.int8),
                 "collaborate_with": np.zeros(self.env.max_peer_group_size, dtype=np.int8),
                 "put_effort": np.zeros(self.env.max_projects_per_agent + 1, dtype=np.int8),
             }
-            sample_vec = self._flatten_to_vector({"observation": self._obs_template, "action_mask": self._mask_template})
+            # Normalize template to get correct structure with ALL slots
+            self._obs_template = self._create_normalized_obs_template(raw_obs_template)
+
+            # Create sample vector - pass a flag to _flatten_to_vector to indicate this is a template
+            nested_template = {"observation": self._obs_template, "action_mask": self._mask_template, "_is_template": True}
+            sample_vec = self._flatten_to_vector(nested_template)
         else:
-            # Fallback: derive vector size from runtime reset
-            observations, infos = self.env.reset(seed=0)
-            sample_agent = self._ref_agent if self._ref_agent in observations else next(iter(observations.keys()))
-            # With no declared space, we cannot build a template; will be less stable.
-            # We still create a best-effort template from this sample.
-            nested = observations[sample_agent]
-            if not (isinstance(nested, dict) and "observation" in nested and "action_mask" in nested):
-                raise TypeError(
-                    "Env must return nested obs {'observation':..., 'action_mask':...} "
-                    "for this wrapper to work."
-                )
+            raise RuntimeError("Cannot create template: observation_space is None")
+            nested_template = {"observation": self._obs_template, "action_mask": self._mask_template, "_is_template": True}
+            sample_vec = self._flatten_to_vector(nested_template)
             self._obs_template = self._deep_copy_numeric(nested.get("observation", {}))
             self._mask_template = self._deep_copy_numeric(nested.get("action_mask", {}))
-            sample_vec = self._flatten_to_vector({"observation": self._obs_template, "action_mask": self._mask_template})
+            # Normalize template BEFORE flattening
+            normalized_obs_template = self._create_normalized_obs_template(self._obs_template)
+            # Use the normalized template for all future flattening operations
+            self._obs_template = normalized_obs_template
+            sample_vec = self._flatten_to_vector(
+                {"observation": normalized_obs_template, "action_mask": self._mask_template})
 
-        # AUTO-ADAPT if env_config suggests a specific expected size (e.g. 258)
-        # We check both the passed __init__ arguments and the environment's config.
-        # This is a bit of a hack but helps with backward compatibility.
-        expected_size = self._expected_obs_size
-        
-        if expected_size:
-            if expected_size == 287 and sample_vec.size == 297:
-                print(f"[COMPAT] Detected expected_obs_size=287. Disabling peer_valid_mask to match.")
-                self._include_peer_valid_mask = False
-                sample_vec = self._flatten_to_vector({"observation": self._obs_template, "action_mask": self._mask_template})
-            elif expected_size == 258 and sample_vec.size == 297:
-                print(f"[COMPAT] Detected expected_obs_size=258. Attempting to match by disabling masks.")
-                self._include_peer_valid_mask = False
-                # Try disabling action mask too if 258 is even smaller
-                sample_vec = self._flatten_to_vector({"observation": self._obs_template, "action_mask": self._mask_template})
-                if sample_vec.size > expected_size:
-                     self._include_action_mask = False
-                     sample_vec = self._flatten_to_vector({"observation": self._obs_template, "action_mask": self._mask_template})
-            elif expected_size == 268 and sample_vec.size == 297:
-                print(f"[COMPAT] Detected expected_obs_size=268. Disabling masks to match.")
-                self._include_peer_valid_mask = False
-                self._include_action_mask = False
-                sample_vec = self._flatten_to_vector({"observation": self._obs_template, "action_mask": self._mask_template})
-            elif expected_size < sample_vec.size:
-                # Last resort: truncate if we still don't match after disabling masks
-                # (This is dangerous but might work for tiny mismatches)
-                print(f"[COMPAT] Warning: expected_obs_size={expected_size} < current_size={sample_vec.size}. Will truncate during flattening.")
-
+        # Set observation_space
+        # IMPORTANT: Use the ACTUAL flattened size from sample_vec
+        # This is the real size that _flatten_to_vector() produces at runtime
+        # NOT the template-based size which can differ when running_projects normalization changes sizes
         self.observation_space = Box(
             low=-np.inf,
             high=np.inf,
             shape=(int(sample_vec.size),),
             dtype=np.float32,
         )
-        
-        # DEBUG LOGGING (helpful for size mismatch troubleshooting)
-        # print(f"[DEBUG_WRAPPER] Observation Space initialized (size={sample_vec.size}):")
-        # print(f"  - mpgs={self.env.max_peer_group_size}, mppa={self.env.max_projects_per_agent}, nps={self.env.n_projects_per_step}")
-        # print(f"  - observation (nested): {self._flatten_any_like_template(self._obs_template, self._obs_template).size}")
-        # print(f"  - action_mask: {self._flatten_mask_like_template(self._mask_template, self._mask_template).size}")
-        # print(f"  - peer_valid_mask: {self._CB}")
-        import sys
-        sys.stdout.flush()
+
+        # Set expected_obs_size ONCE during initialization - NEVER change it later!
+        self.expected_obs_size = int(sample_vec.size)
 
         # Don't overwrite last observations here; caller will call reset() before stepping.
         self._last_observations = {}
         self.current_controlled = self._ref_agent
-        
-    # Remove debug prints and injected info
 
     # -----------------------------
     # Action encoding/decoding
@@ -281,122 +225,54 @@ class RLLibSingleAgentWrapper(gym.Env):
 
     def _decode_action(self, a: Any, agent_id: Optional[str] = None) -> ActionDict:
         """Pass-through or convert action into env dict format.
-        
-        Note on 'collaborate_with': 
-        - The raw action from the policy contains 'intents' (bits for each peer slot).
-        - These are decoded here (n_requested_collaborators).
-        - Subsequently, _apply_action_mask() removes bits for invalid/inactive slots.
-        - Finally, the environment only starts a project if BOTH agents select it 
-          AND have mutual collaboration bits set.
-        
-        Supports:
-        1. Dict actions (preferred): {'choose_project': int, 'put_effort': int, 'collaborate_with': ndarray}
-        2. Tuple/List actions (legacy/RLlib internal): [CP, PE, CB_bits]
-        3. Integer actions (legacy/fallback): decoded using modulo/bitmasking
+
+        Now expects Dict actions with discrete choose_project and put_effort:
+        {'choose_project': int, 'put_effort': int, 'collaborate_with': ndarray or float}
         """
-        
-        # 1. Dictionary format (Matches our new action_space)
+
+        # 1. Dictionary format (PRIMARY - from RLlib policy)
         if isinstance(a, dict):
-            # Already in dict format or close to it
             choose_project = int(a.get("choose_project", 0))
             put_effort = int(a.get("put_effort", 0))
-            collab_bits = np.asarray(a.get("collaborate_with", np.zeros(self._CB, dtype=np.float32)), dtype=np.float32)
-            # Threshold if using Box (which might be continuous)
+            collab = a.get("collaborate_with", np.zeros(self._CB, dtype=np.float32))
+
+            # Threshold collaboration intent to binary bits
+            collab_bits = np.asarray(collab, dtype=np.float32)
             collab_bits = (collab_bits > 0.5).astype(np.int8)
 
-            do_debug = self.debug_effort
-            # Robust debug logic: check if the agent matches the one we want to control
-            # or matches the currently selected controlled agent.
-            target = self.current_controlled or str(self._choose_controlled)
-            if self.debug_effort_agent_only and agent_id is not None and agent_id != target:
-                do_debug = False
-
-            if do_debug:
-                print(f"[DEBUG_EFFORT][Single Agent Wrapper] _decode_action (Dict) for {agent_id or 'unknown'}:")
-                print(f"  - choose_project: {choose_project}")
-                print(f"  - put_effort: {put_effort}")
-                n_requested = int(np.sum(collab_bits))
-                print(f"  - n_requested_collaborators: {n_requested} (Intent before masking)")
-                import sys
-                sys.stdout.flush()
-
             return {
                 "choose_project": choose_project,
                 "put_effort": put_effort,
                 "collaborate_with": collab_bits,
             }
 
-        # 2. Box-based actions (Legacy/Fallback for older checkpoints or manual testing)
-        # Note: We keep this for backward compatibility if we load an old model,
-        # but the primary path will be via Dict.
-        if isinstance(a, np.ndarray) and a.ndim == 1 and len(a) == (self._CB + 2):
-            raw_cp = a[0]
-            raw_pe = a[1]
-            raw_cb = a[2:]
-            
-            choose_project = int(np.round(raw_cp))
-            put_effort = int(np.round(raw_pe))
-            collab_bits = np.round(raw_cb).astype(np.int8)
-            
-            do_debug = self.debug_effort
-            target = self.current_controlled or str(self._choose_controlled)
-            if self.debug_effort_agent_only and agent_id is not None and agent_id != target:
-                do_debug = False
-
-            if do_debug:
-                print(f"[DEBUG_EFFORT][Single Agent Wrapper] _decode_action (Box/Legacy) for {agent_id or 'unknown'}:")
-                print(f"  - raw_effort: {raw_pe:.4f} -> {put_effort}")
-                print(f"  - raw_choose_project: {raw_cp:.4f} -> {choose_project}")
-                n_requested = int(np.sum(collab_bits))
-                print(f"  - n_requested_collaborators: {n_requested} (Intent before masking)")
-                import sys
-                sys.stdout.flush()
-
-            return {
-                "choose_project": choose_project,
-                "put_effort": put_effort,
-                "collaborate_with": collab_bits,
-            }
-
-        # 3. Tuple/List actions (Sometimes returned by RLlib's older internal mechanisms)
+        # 2. Fallback for legacy tuple/list actions
         if isinstance(a, (tuple, list)) and len(a) >= 3:
             return {
                 "choose_project": int(a[0]),
                 "put_effort": int(a[1]),
                 "collaborate_with": np.asarray(a[2], dtype=np.int8),
             }
-        
-        # 3b. Numpy 1D array actions treated like tuple/list (len >= 3)
-        if isinstance(a, np.ndarray) and a.ndim == 1 and len(a) >= 3:
+
+        # 3. Fallback for legacy flat Box actions (should not happen with new action_space)
+        if isinstance(a, np.ndarray) and a.ndim == 1 and len(a) == (self._CB + 2):
+            choose_project = int(np.round(a[0]))
+            put_effort = int(np.round(a[1]))
+            collab_bits = np.round(a[2:]).astype(np.int8)
             return {
-                "choose_project": int(a[0]),
-                "put_effort": int(a[1]),
-                "collaborate_with": np.asarray(a[2], dtype=np.int8),
+                "choose_project": choose_project,
+                "put_effort": put_effort,
+                "collaborate_with": collab_bits,
             }
-        
-        if isinstance(a, dict):
-            # Already in dict format from our older action_space
-            return {
-                "choose_project": int(a.get("choose_project", 0)),
-                "collaborate_with": np.asarray(a.get("collaborate_with", np.zeros(self._CB, dtype=np.int8)), dtype=np.int8),
-                "put_effort": int(a.get("put_effort", 0)),
-            }
-        
-        # 4. Numpy scalar or length-1 array representing a discrete action id
-        if isinstance(a, np.ndarray) and (a.shape == () or a.size == 1):
-            a = a.item()
-        
-        # Fallback for old integer actions (if any remain in tests/heuristics)
+
+        # 4. Fallback for old integer actions (legacy support)
         a = int(a)
         collab_base = 1 << self._CB
         collab_code = a % collab_base
         a //= collab_base
-
         put_effort = a % self._PE
         a //= self._PE
-
         choose_project = a % self._CP
-
         collab_bits = np.array([(collab_code >> i) & 1 for i in range(self._CB)], dtype=np.int8)
 
         return {
@@ -405,12 +281,12 @@ class RLLibSingleAgentWrapper(gym.Env):
             "put_effort": int(put_effort),
         }
 
-    def decode_action_id(self, action_id: Any, agent_id: Optional[str] = None) -> Dict[str, Any]:
+    def decode_action_id(self, action_id: Any) -> Dict[str, Any]:
         """Public API: decode an action into a human-readable dict.
 
         Now supports both dict actions and legacy integer IDs.
         """
-        decoded = self._decode_action(action_id, agent_id=agent_id)
+        decoded = self._decode_action(action_id)
         collab = decoded["collaborate_with"]
         return {
             "choose_project": decoded["choose_project"],
@@ -419,7 +295,8 @@ class RLLibSingleAgentWrapper(gym.Env):
             "n_collaborators": int(np.sum(collab)),
         }
 
-    def _apply_action_mask(self, decoded: ActionDict, nested_obs: NestedObs, agent_id: Optional[str] = None) -> ActionDict:
+    def _apply_action_mask(self, decoded: ActionDict, nested_obs: NestedObs,
+                           agent_id: Optional[str] = None) -> ActionDict:
         """Repair invalid actions using the env-provided action_mask.
 
         Treat mask values >0 as allowed (your env sometimes uses 2).
@@ -435,164 +312,26 @@ class RLLibSingleAgentWrapper(gym.Env):
         cp_mask = np.asarray(mask.get("choose_project", []))
         if cp_mask.size:
             cp = int(decoded.get("choose_project", 0))
-            is_agent = (agent_id == self.current_controlled)
-            do_debug = self.debug_effort and (not self.debug_effort_agent_only or is_agent)
-            
             if cp < 0 or cp >= cp_mask.size or cp_mask[cp] <= 0:
-                old_cp = cp
                 decoded["choose_project"] = 0
-                if do_debug:
-                    active_projects = self._get_active_projects_from_obs(nested_obs, agent_id=agent_id)
-                    n_running = sum(1 for v in active_projects.values() if v is not None)
-                    reason = ""
-                    if old_cp > 0:
-                        if n_running >= self.env.max_projects_per_agent:
-                            reason = " (Reason: max projects limit reached)"
-                        elif old_cp < cp_mask.size:
-                            reason = " (Reason: project opportunity stochastic masking)"
-                        else:
-                            reason = f" (Reason: index {old_cp} out of range for n_projects_per_step {self.env.n_projects_per_step})"
-                    print(f"[DEBUG_EFFORT][Single Agent Wrapper] _apply_action_mask for {agent_id or 'unknown'}: choose_project {old_cp} -> 0 (masked). Active projects: {n_running}/{self.env.max_projects_per_agent}{reason}")
-            elif do_debug:
-                active_projects = self._get_active_projects_from_obs(nested_obs, agent_id=agent_id)
-                n_running = sum(1 for v in active_projects.values() if v is not None)
-                print(f"[DEBUG_EFFORT][Single Agent Wrapper] _apply_action_mask for {agent_id or 'unknown'}: choose_project {cp} is ALLOWED. Active projects: {n_running}/{self.env.max_projects_per_agent}")
 
         # put_effort
         pe_mask = np.asarray(mask.get("put_effort", []))
         if pe_mask.size:
             pe = int(decoded.get("put_effort", 0))
-            is_agent = (agent_id == self.current_controlled)
-            do_debug = self.debug_effort and (not self.debug_effort_agent_only or is_agent)
-            
-            if is_agent:
-                self._effort_total_count += 1
-            
             if pe < 0 or pe >= pe_mask.size or pe_mask[pe] <= 0:
-                old_pe = pe
                 decoded["put_effort"] = 0
-                
-                if is_agent:
-                    self._effort_invalid_count += 1
-                
-                if do_debug:
-                    print(f"[DEBUG_EFFORT][Single Agent Wrapper] _apply_action_mask for {agent_id or 'unknown'}: put_effort {old_pe} -> 0 (masked)")
-            else:
-                if is_agent:
-                    self._effort_valid_count += 1
-                
-                if do_debug:
-                    print(f"[DEBUG_EFFORT][Single Agent Wrapper] _apply_action_mask for {agent_id or 'unknown'}: put_effort {pe} is ALLOWED")
-            
-            if do_debug:
-                running = self._get_active_projects_from_obs(nested_obs, agent_id=agent_id)
-                if not any(v is not None for v in running.values()):
-                    print(f"  - No active projects to work on.")
-                else:
-                    # In put_effort 0 is "no effort", 1..N maps to slots in running_projects
-                    # The slots are project_0, project_1, etc. and correspond to 1..N
-                    for i in range(self.env.max_projects_per_agent):
-                        pid_str = f"project_{i}"
-                        pinfo = running.get(pid_str)
-                        if pinfo is not None:
-                            eff = float(pinfo.get("current_effort", [0])[0])
-                            req = float(pinfo.get("required_effort", [0])[0])
-                            
-                            # Extract time_left (deadline)
-                            time_left = 0
-                            if "time_left" in pinfo:
-                                tl = pinfo["time_left"]
-                                if isinstance(tl, (list, np.ndarray)) and len(tl) > 0:
-                                    time_left = int(tl[0])
-                                else:
-                                    time_left = int(tl)
-                            
-                            # Extract internal project_id for duplicate detection
-                            # PeerGroupEnvironment often puts it in the dict or we can try to find it
-                            internal_id = "unknown"
-                            if "project_id" in pinfo:
-                                internal_id = pinfo["project_id"]
-                            elif "id" in pinfo:
-                                internal_id = pinfo["id"]
-                            
-                            mark = " <--- SELECTED" if pe == i + 1 else ""
-                            print(f"  - Slot {i+1} [Project {pid_str} | ID: {internal_id}]: effort={eff:.2f}/{req:.2f}, deadline={time_left}{mark}")
-                        else:
-                            mark = " <--- SELECTED" if pe == i + 1 else ""
-                            # If SELECTED but empty, it's actually masked anyway by pe_mask[pe] <= 0
-                            print(f"  - Slot {i+1} [Empty]:{mark}")
-                            
-                    if pe == 0:
-                        print(f"  - Slot 0 [No project]: SELECTED")
 
         # collaborate_with
         c_mask = np.asarray(mask.get("collaborate_with", []))
         if c_mask.size:
-            c = decoded.get("collaborate_with")
-            
-            # Ensure 'c' is a 1D numpy array
-            if isinstance(c, (int, np.integer)):
-                # If it's a single integer, convert to bit-vector
-                c = np.array([(c >> i) & 1 for i in range(self._CB)], dtype=np.int8)
-            elif not isinstance(c, np.ndarray):
-                c = np.asarray(c if c is not None else np.zeros(self._CB, dtype=np.int8), dtype=np.int8)
-            else:
-                c = c.copy().astype(np.int8)
-
+            c = np.asarray(decoded.get("collaborate_with", np.zeros(self._CB, dtype=np.int8)), dtype=np.int8).copy()
             allowed = (c_mask > 0)
-
-            # Safety check: if c is somehow still 0-d, make it 1-d
-            if c.ndim == 0:
-                c = c.reshape(1)
-            
-            # Ensure it matches _CB length (PeerGroupEnvironment expects consistent shapes)
-            if len(c) < self._CB:
-                new_c = np.zeros(self._CB, dtype=np.int8)
-                new_c[:len(c)] = c
-                c = new_c
-            elif len(c) > self._CB:
-                c = c[:self._CB]
 
             L = min(len(c), len(allowed))
             c_slice = c[:L]
-            pruned_count = np.sum(c_slice[~allowed[:L]])
             c_slice[~allowed[:L]] = 0
             c[:L] = c_slice
-
-            if self.debug_effort and (not self.debug_effort_agent_only or agent_id == self.current_controlled):
-                n_collab = int(np.sum(c))
-                print(f"[DEBUG_EFFORT][Single Agent Wrapper] _apply_action_mask for {agent_id or 'unknown'}: collaborate_with masked {pruned_count} bits, {n_collab} remain")
-                if pruned_count > 0:
-                    # In _apply_action_mask, nested_obs has {"observation": {...}, "action_mask": {...}}
-                    obs_dict = nested_obs.get("observation", {}) if isinstance(nested_obs, dict) else {}
-                    if not obs_dict and isinstance(nested_obs, dict) and "peer_group" in nested_obs:
-                        obs_dict = nested_obs
-
-                    peer_group = np.atleast_1d(obs_dict.get("peer_group", [])) # array of 1 (active) or 0 (inactive)
-                    # peer_group from observation is a binary array (1=active, 0=inactive/empty)
-                    # c_mask also has >0 for active, 0 for inactive/empty
-                    
-                    # We can't easily distinguish 'EMPTY' from 'INACTIVE' just from peer_group,
-                    # as both are 0. But we know that slots up to the actual number of peers
-                    # in the group are 'INACTIVE' if not active, and slots beyond that are 'EMPTY'.
-                    # However, the environment's peer_group in obs is already a bit-mask.
-                    
-                    # To be more precise, we'd need the actual peer IDs or group size.
-                    # In PeerGroupEnvironment, peer_group in obs is indeed just the bitmask of active agents.
-                    
-                    inactive_indices = np.where((c_mask[:L] == 0) & (decoded.get("collaborate_with")[:L] > 0))[0]
-                    if len(inactive_indices) > 0:
-                        # Let's try to find out if it's a padding slot or an inactive agent
-                        # The environment doesn't provide the raw peer_group IDs in the observation, 
-                        # only the bitmask of active ones.
-                        print(f"  - Masked reasons: {len(inactive_indices)} peer slots are INACTIVE (agent exists but not active) or EMPTY (no agent in this slot)")
-                        # for idx in inactive_indices:
-                        #     print(f"    * Slot {idx}: Masked (Agent not active or slot empty)")
-                    
-                    # Also explain 2 vs 0 in c_mask
-                    active_peers = np.where(c_mask > 0)[0]
-                    if len(active_peers) == 0:
-                        print(f"  - NO peers are currently active/available for collaboration.")
 
             if len(c) > L:
                 c[L:] = 0
@@ -613,71 +352,12 @@ class RLLibSingleAgentWrapper(gym.Env):
 
         return decoded
 
-    def _get_active_projects_from_obs(self, nested_obs: NestedObs, agent_id: Optional[str] = None) -> Dict[str, Any]:
-        """Extract active projects from nested observation, including empty slots.
-        
-        Returns a dictionary mapping 'project_{i}' keys (0..max_projects-1) to their project info
-        or None if the slot is empty.
-        """
-        obs_dict = nested_obs.get("observation", {}) if isinstance(nested_obs, dict) else {}
-        
-        if not obs_dict and isinstance(nested_obs, dict):
-            if "running_projects" in nested_obs or "peer_group" in nested_obs:
-                obs_dict = nested_obs
-        
-        running = obs_dict.get("running_projects", {})
-        if not isinstance(running, dict):
-            return {f"project_{i}": None for i in range(self.env.max_projects_per_agent)}
-        
-        # Determine the agent index to access the environment's ground truth for slot mapping
-        target = agent_id or self.current_controlled or str(self._choose_controlled)
-        agent_idx = self.env.agent_to_id.get(target)
-        
-        all_slots = {}
-        for i in range(self.env.max_projects_per_agent):
-            key = f"project_{i}"
-            
-            # Ground truth: What project ID is in this slot?
-            p_id = None
-            if agent_idx is not None:
-                p_id = self.env.agent_active_projects[agent_idx][i]
-            
-            # Try to find the project in the observation.
-            # 1. Try by slot key (project_0, project_1...) as per observation_space
-            v = running.get(key)
-            
-            # 2. Try by project ID (project_{p_id}) as per _get_running_projects_obs
-            if v is None and p_id is not None:
-                v = running.get(f"project_{p_id}")
-            
-            is_active = False
-            if isinstance(v, dict):
-                # Check for either required_effort or prestige (both present in valid obs)
-                if "required_effort" in v or "prestige" in v:
-                    re = v.get("required_effort", v.get("prestige", [0]))
-                    if isinstance(re, (list, np.ndarray)) and len(re) > 0:
-                        val = float(re[0])
-                    else:
-                        val = float(re)
-                    if val > 0:
-                        is_active = True
-            
-            if is_active:
-                # Add the project ID to the info dict for easier debugging/identification
-                # if it's not already there.
-                if isinstance(v, dict):
-                    if "project_id" not in v and "id" not in v:
-                        v["project_id"] = p_id if p_id is not None else "unknown"
-                all_slots[key] = v
-            else:
-                all_slots[key] = None
-        return all_slots
-
     # -----------------------------
     # Top-k collaboration helpers
     # -----------------------------
 
-    def _extract_peer_feature_array(self, obs: Any, candidate_keys: Iterable[str], length: int, default_value: Any = 0.0) -> Optional[np.ndarray]:
+    def _extract_peer_feature_array(self, obs: Any, candidate_keys: Iterable[str], length: int,
+                                    default_value: Any = 0.0) -> Optional[np.ndarray]:
         """Search nested obs dict for a 1D array under any of candidate_keys.
 
         The observation structure may change; we try a flexible search:
@@ -717,7 +397,7 @@ class RLLibSingleAgentWrapper(gym.Env):
         arr = np.asarray(found, dtype=np.float32).ravel()
         if arr.size < length:
             if default_value is None:
-                # If we need a specific length but only found a shorter array, 
+                # If we need a specific length but only found a shorter array,
                 # we pad with 0.0 even if default_value is None, to avoid partial failure.
                 pad = np.zeros((length - arr.size,), dtype=np.float32)
             else:
@@ -818,13 +498,14 @@ class RLLibSingleAgentWrapper(gym.Env):
         if dist is None:
             # Fallback: compute Euclidean distance from centroids if available
             p_centroids = self._extract_peer_feature_array(obs, ["peer_centroids"], self._CB * 2, default_value=0.0)
-            s_centroid = self._extract_peer_feature_array(obs, ["self_centroid", "self_centroids"], 2, default_value=0.0)
-            
+            s_centroid = self._extract_peer_feature_array(obs, ["self_centroid", "self_centroids"], 2,
+                                                          default_value=0.0)
+
             p_centroids = p_centroids.reshape(self._CB, 2)
             s_centroid = s_centroid.reshape(1, 2)
-            
+
             # Distance: sqrt(sum((p - s)^2))
-            dist = np.sqrt(np.sum((p_centroids - s_centroid)**2, axis=1)).astype(np.float32)
+            dist = np.sqrt(np.sum((p_centroids - s_centroid) ** 2, axis=1)).astype(np.float32)
 
         # Same-group bonus
         own_gid = self._extract_agent_group_id(obs)
@@ -848,9 +529,9 @@ class RLLibSingleAgentWrapper(gym.Env):
         dist_n = _min_max_normalize(dist)
 
         scores = (
-            self.w_rep * rep_n
-            - self.w_dist * dist_n
-            + self.w_same * same_group
+                self.w_rep * rep_n
+                - self.w_dist * dist_n
+                + self.w_same * same_group
         ).astype(np.float32, copy=False)
 
         # Deterministic tie-breaking: tiny, seeded noise
@@ -861,13 +542,13 @@ class RLLibSingleAgentWrapper(gym.Env):
         return scores
 
     def _apply_topk_collaboration(
-        self,
-        collab_bits: np.ndarray,
-        collab_mask: np.ndarray,
-        nested_obs: NestedObs,
-        *,
-        agent_id: Optional[str],
-        k: int,
+            self,
+            collab_bits: np.ndarray,
+            collab_mask: np.ndarray,
+            nested_obs: NestedObs,
+            *,
+            agent_id: Optional[str],
+            k: int,
     ) -> np.ndarray:
         """Apply top-k pruning to the collaboration bit-vector.
 
@@ -921,60 +602,213 @@ class RLLibSingleAgentWrapper(gym.Env):
     # Observation flattening (stable)
     # -----------------------------
 
+
+    def _safe_scalar(self, value: Any, default: float = 0.0, dtype=float):
+        """Best-effort extraction of a scalar from numpy/scalar/list-like input."""
+        try:
+            arr = np.asarray(value)
+            if arr.size == 0:
+                return dtype(default)
+            return dtype(arr.reshape(-1)[0])
+        except Exception:
+            return dtype(default)
+
+    def _make_slot_identity_features(self, slot_idx: int) -> Dict[str, Any]:
+        """Explicit slot identification features for flat MLP policies."""
+        one_hot = np.zeros(self.env.max_projects_per_agent, dtype=np.float32)
+        if 0 <= slot_idx < self.env.max_projects_per_agent:
+            one_hot[slot_idx] = 1.0
+
+        denom = max(self.env.max_projects_per_agent - 1, 1)
+        return {
+            "slot_index": np.array([slot_idx], dtype=np.int32),
+            "slot_index_normalized": np.array([slot_idx / denom], dtype=np.float32),
+            "slot_one_hot": one_hot,
+        }
+
+    def _encode_project_slot(self, project_obs: Optional[Dict[str, Any]], slot_idx: int, *, is_active: bool) -> Dict[str, Any]:
+        """
+        Convert a raw running-project observation into a compact, slot-stable encoding.
+
+        Design goals:
+        - Explicitly distinguish active vs. dummy slots via `is_active`
+        - Give the policy semantically useful project progress features
+        - Provide explicit slot identity (scalar + one-hot) for flat MLPs
+        - Avoid high-dimensional, noisy peer vectors by summarizing them
+        """
+        if not is_active or not isinstance(project_obs, dict):
+            project_obs = {}
+
+        required_effort = self._safe_scalar(project_obs.get("required_effort", 0), default=0.0, dtype=float)
+        current_effort = self._safe_scalar(project_obs.get("current_effort", 0.0), default=0.0, dtype=float)
+        time_left = self._safe_scalar(project_obs.get("time_left", 0), default=0.0, dtype=float)
+        prestige = self._safe_scalar(project_obs.get("prestige", 0.0), default=0.0, dtype=float)
+        novelty = self._safe_scalar(project_obs.get("novelty", 0.0), default=0.0, dtype=float)
+
+        societal_value = self._safe_scalar(
+            project_obs.get("societal_value", project_obs.get("societal_value_score", 0.0)),
+            default=0.0,
+            dtype=float,
+        )
+
+        contributors = np.asarray(project_obs.get("contributors", np.zeros(self._CB, dtype=np.int8)), dtype=np.float32).ravel()
+        contributor_effort = np.asarray(
+            project_obs.get("contributor_effort", np.zeros(self._CB, dtype=np.float32)),
+            dtype=np.float32,
+        ).ravel()
+        peer_fit = np.asarray(project_obs.get("peer_fit", np.zeros(self._CB, dtype=np.float32)), dtype=np.float32).ravel()
+
+        if contributors.size < self._CB:
+            contributors = np.pad(contributors, (0, self._CB - contributors.size))
+        else:
+            contributors = contributors[:self._CB]
+
+        if contributor_effort.size < self._CB:
+            contributor_effort = np.pad(contributor_effort, (0, self._CB - contributor_effort.size))
+        else:
+            contributor_effort = contributor_effort[:self._CB]
+
+        if peer_fit.size < self._CB:
+            peer_fit = np.pad(peer_fit, (0, self._CB - peer_fit.size))
+        else:
+            peer_fit = peer_fit[:self._CB]
+
+        if is_active:
+            remaining_effort = max(required_effort - current_effort, 0.0)
+            progress_ratio = current_effort / max(required_effort, 1.0)
+            urgency = 1.0 / max(time_left, 1.0)
+            num_contributors = float(np.sum(contributors > 0.0))
+
+            active_peer_fit = peer_fit[contributors > 0.0]
+            if active_peer_fit.size == 0:
+                active_peer_fit = peer_fit[peer_fit != 0.0]
+
+            peer_fit_mean = float(np.mean(active_peer_fit)) if active_peer_fit.size else 0.0
+            peer_fit_max = float(np.max(active_peer_fit)) if active_peer_fit.size else 0.0
+            total_contributor_effort = float(np.sum(contributor_effort))
+        else:
+            required_effort = 0.0
+            current_effort = 0.0
+            remaining_effort = 0.0
+            progress_ratio = 0.0
+            time_left = 0.0
+            urgency = 0.0
+            prestige = 0.0
+            novelty = 0.0
+            societal_value = 0.0
+            num_contributors = 0.0
+            peer_fit_mean = 0.0
+            peer_fit_max = 0.0
+            total_contributor_effort = 0.0
+
+        encoded = {
+            "is_active": np.array([1 if is_active else 0], dtype=np.int8),
+            "required_effort": np.array([required_effort], dtype=np.float32),
+            "current_effort": np.array([current_effort], dtype=np.float32),
+            "remaining_effort": np.array([remaining_effort], dtype=np.float32),
+            "progress_ratio": np.array([progress_ratio], dtype=np.float32),
+            "time_left": np.array([time_left], dtype=np.float32),
+            "urgency": np.array([urgency], dtype=np.float32),
+            "prestige": np.array([prestige], dtype=np.float32),
+            "novelty": np.array([novelty], dtype=np.float32),
+            "societal_value": np.array([societal_value], dtype=np.float32),
+            "num_contributors": np.array([num_contributors], dtype=np.float32),
+            "peer_fit_mean": np.array([peer_fit_mean], dtype=np.float32),
+            "peer_fit_max": np.array([peer_fit_max], dtype=np.float32),
+            "total_contributor_effort": np.array([total_contributor_effort], dtype=np.float32),
+        }
+        encoded.update(self._make_slot_identity_features(slot_idx))
+
+        return encoded
+
+    def _create_normalized_obs_template(self, obs_template: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Create a normalized observation template that ensures running_projects
+        always has ALL max_projects_per_agent slots in the new compact encoding.
+        """
+        obs_copy = self._deep_copy_numeric(obs_template) if obs_template else {}
+
+        running_projects = obs_copy.get("running_projects", {})
+        if not isinstance(running_projects, dict):
+            running_projects = {}
+
+        normalized_running = {}
+        for i in range(self.env.max_projects_per_agent):
+            project_key = f"project_{i}"
+            raw_project = running_projects.get(project_key)
+            normalized_running[project_key] = self._encode_project_slot(
+                raw_project,
+                i,
+                is_active=bool(isinstance(raw_project, dict) and len(raw_project) > 0),
+            )
+
+        obs_copy["running_projects"] = normalized_running
+        return obs_copy
+
     def _flatten_to_vector(self, nested_obs: Any) -> np.ndarray:
         """
-        Env returns per-agent nested obs:
-          {"observation": <dict>, "action_mask": <dict>}
-        We flatten both in a stable, template-driven order.
-        We also append a peer_valid_mask indicating which slots contain real peers.
+        Flatten nested per-agent observations in a template-driven, size-stable way.
+
+        Before flattening, raw `running_projects` observations are normalized into the
+        compact per-slot encoding so that all project slots share the same structure.
+
+        NOTE: If _is_template flag is present and True, don't normalize (template is already normalized).
         """
         if not (isinstance(nested_obs, dict) and "observation" in nested_obs):
             raise TypeError("Expected nested obs: {'observation': ..., 'action_mask': ...}")
 
+        # Check if this is a template (already normalized during init)
+        is_template = nested_obs.pop("_is_template", False)
+
         obs_part = nested_obs.get("observation", {})
         mask_part = nested_obs.get("action_mask", {})
 
+        # Only normalize if NOT a template
+        if not is_template:
+            obs_part = self._normalize_observation(obs_part)
+
         obs_vec = self._flatten_any_like_template(obs_part, self._obs_template)
-        
-        parts = [obs_vec]
-        
-        if self._include_action_mask:
-            mask_vec = self._flatten_mask_like_template(mask_part, self._mask_template)
-            parts.append(mask_vec)
+        mask_vec = self._flatten_mask_like_template(mask_part, self._mask_template)
 
-        if self._include_peer_valid_mask:
-            # Build peer_valid_mask: 1 if peer_group[i] > 0 (or peer is present), 0 otherwise.
-            # peer_group in PeerGroupEnvironment uses 0 for no agent (agents are 1-indexed in IDs or positive).
-            peer_group = np.asarray(obs_part.get("peer_group", np.zeros(self._CB)))
-            peer_valid_mask = (peer_group > 0).astype(np.float32)
-            if peer_valid_mask.size < self._CB:
-                pad = np.zeros(self._CB - peer_valid_mask.size, dtype=np.float32)
-                peer_valid_mask = np.concatenate([peer_valid_mask, pad])
-            elif peer_valid_mask.size > self._CB:
-                peer_valid_mask = peer_valid_mask[:self._CB]
-            parts.append(peer_valid_mask)
+        out = np.concatenate([obs_vec, mask_vec]).astype(np.float32, copy=False)
 
-        # Compatibility check for older checkpoints that didn't have the peer_valid_mask.
-        # If the observation size doesn't match, we might need to adjust it.
-        # The observation_space is set in __init__ based on sample_vec.size.
-        
-        # Build the final flattened vector
-        out = np.concatenate(parts).astype(np.float32, copy=False)
-        
-        # Compatibility truncation / padding if size mismatch was detected
-        if self._expected_obs_size is not None:
-             expected = self._expected_obs_size
-             if out.size != expected:
-                  if out.size > expected:
-                       out = out[:expected]
-                  else:
-                       pad = np.zeros(expected - out.size, dtype=np.float32)
-                       out = np.concatenate([out, pad])
-        
-        # Handle cases where the model expects a different size (if it was trained with an older version)
-        # However, RLlib will usually complain during setup if there's a mismatch.
-        
+        # Log size mismatch only if it's substantial (suppress for now since env naturally has variable sizes)
+        if len(out) != self.expected_obs_size and self.expected_obs_size > 0:
+            # Only log if mismatch is more than 5% or if this is initialization phase
+            pct_diff = abs(len(out) - self.expected_obs_size) / float(self.expected_obs_size) * 100
+            if pct_diff > 5:
+                logger.debug(f"Observation size mismatch: got {len(out)} expected {self.expected_obs_size} ({pct_diff:.1f}% diff)")
+
         return out
+
+    def _normalize_observation(self, obs_part: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Normalize observation to ensure consistent size across episodes.
+
+        Running-project slots are converted from raw env observations into a compact
+        per-slot encoding with:
+        - explicit activity flag
+        - progress / remaining effort / urgency
+        - summarized collaborator information
+        - explicit slot identity features
+        """
+        obs_copy = obs_part.copy() if isinstance(obs_part, dict) else {}
+
+        raw_running = obs_copy.get("running_projects", {})
+        if not isinstance(raw_running, dict):
+            raw_running = {}
+
+        normalized_running = {}
+        for i in range(self.env.max_projects_per_agent):
+            project_key = f"project_{i}"
+            raw_project = raw_running.get(project_key)
+            is_active = bool(isinstance(raw_project, dict) and len(raw_project) > 0)
+            normalized_running[project_key] = self._encode_project_slot(raw_project, i, is_active=is_active)
+
+        obs_copy["running_projects"] = normalized_running
+        return obs_copy
+
+
 
     def _flatten_any_like_template(self, x: Any, tmpl: Any) -> np.ndarray:
         """
@@ -1023,9 +857,6 @@ class RLLibSingleAgentWrapper(gym.Env):
         observations, infos = self.env.reset(seed=seed, options=options)
         self._last_observations = observations
         self._t = 0
-        self._effort_total_count = 0
-        self._effort_invalid_count = 0
-        self._effort_valid_count = 0
 
         # RL Reproducibility: seed wrapper's own action_space so that
         # fallback sampling (for agents without policies) is deterministic
@@ -1044,7 +875,9 @@ class RLLibSingleAgentWrapper(gym.Env):
             raise RuntimeError(f"controlled agent {self.current_controlled} not in env observations")
 
         nested = observations[self.current_controlled]
+
         obs_vec = self._flatten_to_vector(nested)
+
         info = infos.get(self.current_controlled, {})
 
         obs_vec = self._ensure_obs_vector_ok(obs_vec, where="reset")
@@ -1055,65 +888,16 @@ class RLLibSingleAgentWrapper(gym.Env):
             if not self._env_obs_space.contains(obs_part):
                 logger.warning("Env observation NOT contained in env.observation_space(%s) at reset()", self._ref_agent)
 
-        logger.info("Episode START for %s (obs_len=%d, force_horizon=%s)", self.current_controlled, obs_vec.size, self._force_horizon)
+        logger.info("Episode START for %s (obs_len=%d, force_horizon=%s)", self.current_controlled, obs_vec.size,
+                    self._force_horizon)
         # print(f"[WRAPPER] Episode START for {self.current_controlled} (obs_len={obs_vec.size}, force_horizon={self._force_horizon})")
         return obs_vec, info
-
-    def _summarize_obs(self, nested_obs: NestedObs) -> Dict[str, Any]:
-        """Create a compact summary of the observation for logging."""
-        obs = nested_obs.get("observation", {})
-        
-        # Peer group size
-        peer_group = np.asarray(obs.get("peer_group", []))
-        n_peers = int(np.sum(peer_group > 0))
-        
-        # Projects available
-        opps = obs.get("project_opportunities", {})
-        n_opps = len(opps)
-        
-        # Active projects
-        running = obs.get("running_projects", {})
-        n_running = len(running)
-        
-        # Self stats
-        age = int(obs.get("age", [0])[0])
-        acc_rew = float(obs.get("accumulated_rewards", [0])[0])
-        
-        return {
-            "n_peers": n_peers,
-            "n_opps": n_opps,
-            "n_running": n_running,
-            "age": age,
-            "acc_rew": round(acc_rew, 2)
-        }
 
     def step(self, action):
         if self.current_controlled is None:
             raise RuntimeError("Wrapper not reset() before step().")
 
-        # Optional logging of the observation BEFORE taking the action
-        if self.info_action and (self._t % self.info_interval == 0):
-            try:
-                nested_obs = self._last_observations.get(self.current_controlled, {})
-                summary = self._summarize_obs(nested_obs)
-                tag = "[EVAL]" if self.is_evaluation else "[TRAIN]"
-                # Use t+1 for the upcoming step matching the action log
-                print(f"{tag} [OBS] t={self._t + 1} summary={summary}")
-            except Exception as e:
-                tag = "[EVAL]" if self.is_evaluation else "[TRAIN]"
-                print(f"{tag} [OBS] t={self._t + 1} (error: {e})")
-
-        # Optional logging of the action taken by the controlled agent
-        if self.info_action and (self._t % self.info_interval == 0):
-            try:
-                decoded = self.decode_action_id(action, agent_id=self.current_controlled)
-                # Just print decoded to avoid multi-line array noise
-                tag = "[EVAL]" if self.is_evaluation else "[TRAIN]"
-                print(f"{tag} [ACTION] t={self._t + 1} decoded={decoded} | rew=...")
-            except Exception as e:
-                tag = "[EVAL]" if self.is_evaluation else "[TRAIN]"
-                print(f"{tag} [ACTION] t={self._t + 1} action_type={type(action)} | rew=... (decode error: {e})")
-
+        # IMPORTANT: use keys from last observations (guaranteed the set of agents we can act for)
         active_agents: List[str] = list(self._last_observations.keys())
         actions: Dict[str, Any] = {}
 
@@ -1136,7 +920,7 @@ class RLLibSingleAgentWrapper(gym.Env):
                     except Exception as e:
                         logger.error(f"Policy for agent {ag} failed: {e}")
                         a = do_nothing_policy(nested_obs["observation"], nested_obs["action_mask"])
-                    
+
                     if isinstance(a, dict):
                         a = self._apply_action_mask(a, nested_obs, agent_id=ag)
                     actions[ag] = a
@@ -1149,17 +933,7 @@ class RLLibSingleAgentWrapper(gym.Env):
                     actions[ag] = decoded
 
         # print(f"Wrapper.step(t={self._t}) with {len(actions)} actions")
-        
-        # Suppress "No more agents to activate!" print from the environment
-        # as requested by the user.
-        with open(os.devnull, 'w') as fnull:
-            old_stdout = sys.stdout
-            sys.stdout = fnull
-            try:
-                observations, rewards, terminations, truncations, infos = self.env.step(actions)
-            finally:
-                sys.stdout = old_stdout
-
+        observations, rewards, terminations, truncations, infos = self.env.step(actions)
         self._last_observations = observations
 
         # Falls der kontrollierte Agent nicht mehr in den Beobachtungen auftaucht
@@ -1220,65 +994,8 @@ class RLLibSingleAgentWrapper(gym.Env):
         info = infos.get(self.current_controlled, {})
         # paper_stats & debug_effort are already in info (set by env.step())
 
-        # Inject paper stats & effort diagnostics
-        info["effort_total_count"] = self._effort_total_count
-        info["effort_invalid_count"] = self._effort_invalid_count
-        info["effort_valid_count"] = self._effort_valid_count
-
-        # Detailed effort analysis for prestige and deadlines
-        try:
-            agent_idx = self.env.agent_to_id.get(self.current_controlled)
-            if agent_idx is not None:
-                active_p_ids = self.env._get_active_projects(agent_idx)
-                if active_p_ids:
-                    prestigies = [self.env.projects[pid].prestige for pid in active_p_ids]
-                    deadlines = [self.env.projects[pid].get_time_remaining(self.env.timestep) for pid in active_p_ids]
-                    
-                    max_prestige = max(prestigies)
-                    min_deadline = min(deadlines)
-                    
-                    effort_idx = int(actions[self.current_controlled].get("put_effort", 0))
-                    # Slot 0 is 'no effort', slots 1..N correspond to active projects
-                    # In PeerGroupEnvironment, the order of active projects matches the observation slots.
-                    # RLLibSingleAgentWrapper assumes this mapping.
-                    
-                    chosen_prestige = 0.0
-                    chosen_deadline = 0
-                    
-                    # Correctly map effort_idx to the specific project slot in the environment
-                    if 1 <= effort_idx <= self.env.max_projects_per_agent:
-                        # self.env.agent_active_projects contains the project IDs (or None) at each slot
-                        # effort_idx 1 corresponds to slot 0
-                        p_id = self.env.agent_active_projects[agent_idx][effort_idx - 1]
-                        if p_id is not None:
-                            project = self.env.projects[p_id]
-                            chosen_prestige = project.prestige
-                            chosen_deadline = project.get_time_remaining(self.env.timestep)
-                    
-                    info["effort_analysis"] = {
-                        "chosen_prestige": chosen_prestige,
-                        "max_prestige": max_prestige,
-                        "chose_max_prestige": 1 if (chosen_prestige >= max_prestige > 0) else 0,
-                        "chosen_remaining_time": chosen_deadline,
-                        "min_remaining_time": min_deadline,
-                        "chose_most_urgent": 1 if (chosen_deadline <= min_deadline and effort_idx > 0 and chosen_deadline > 0) else 0,
-                        "effort_idx": effort_idx,
-                    }
-        except Exception as e:
-            logger.debug(f"Effort analysis failed: {e}")
-
         # Force horizon if requested
         self._t += 1
-        
-        # Optional logging of the result of the action
-        if self.info_action and (self._t % self.info_interval == 0):
-            tag = "[EVAL]" if self.is_evaluation else "[TRAIN]"
-            print(f"{tag} [RESULT] t={self._t} rew={reward}")
-
-        # Inject the actual action taken by the controlled agent for debugging/callbacks
-        info["last_action"] = action
-        self.last_action = action
-
         if self._force_horizon is not None and self._t >= int(self._force_horizon):
             truncated = True
 
@@ -1352,21 +1069,19 @@ class RLLibSingleAgentWrapper(gym.Env):
         """Ensure observation is a 1D float32 vector matching observation_space length."""
         if not isinstance(obs_vec, np.ndarray):
             logger.warning("%s returned non-ndarray obs: %s", where, type(obs_vec))
-            print(f"[WRAPPER] WARNING: {where} returned non-ndarray obs: {type(obs_vec)}")
             obs_vec = np.asarray(obs_vec, dtype=np.float32)
 
         if obs_vec.ndim != 1:
             logger.warning("%s flattened obs not 1D, reshaping: shape=%s", where, getattr(obs_vec, "shape", None))
-            print(f"[WRAPPER] WARNING: {where} flattened obs not 1D, reshaping: shape={getattr(obs_vec,'shape',None)}")
             obs_vec = obs_vec.ravel()
 
         obs_vec = obs_vec.astype(np.float32, copy=False)
 
         expected_len = int(self.observation_space.shape[0])
+
         if obs_vec.size != expected_len:
-            # With template-driven flattening, this should not happen. Keep as a last-resort safeguard.
-            logger.warning("%s obs length mismatch: got %s expected %s; padding/truncating", where, obs_vec.size, expected_len)
-            print(f"[WRAPPER] WARNING: {where} obs length mismatch: got {obs_vec.size} expected {expected_len}; padding/truncating")
+            # Variable observation size is expected behavior (0-8 projects at any given time)
+            # RLlib handles padding/truncating automatically
             if obs_vec.size < expected_len:
                 pad = np.zeros((expected_len - obs_vec.size,), dtype=np.float32)
                 obs_vec = np.concatenate([obs_vec, pad])

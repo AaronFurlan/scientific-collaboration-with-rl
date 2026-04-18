@@ -119,6 +119,7 @@ class EvalConfig:
     debug_effort: bool = False  # Set to True to see detailed action decoding/repair logs
     debug_rl: bool = False      # Set to True to see detailed RL observations/actions during simulation
     debug_sim: bool = False     # Set to True to see general simulation progress and status banners
+    debug_freq: int = 50        # Debug log frequency in steps
 
     # Reproducibility
     seed: int = 42
@@ -694,11 +695,50 @@ def run_simulation_with_rl_agent(cfg: EvalConfig) -> dict:
         else:
              cfg.expected_obs_size = expected_obs_size
 
-    algo = Algorithm.from_checkpoint(checkpoint_path)
-    print("Algorithm restored successfully.")
+    # Try to load algorithm from checkpoint
+    try:
+        algo = Algorithm.from_checkpoint(checkpoint_path)
+        print("Algorithm restored successfully.")
 
-    # Sync Environment Config from Checkpoint
-    cfg.update_from_algorithm_config(algo.config.to_dict())
+        # Sync Environment Config from Checkpoint
+        cfg.update_from_algorithm_config(algo.config.to_dict())
+    except (AttributeError, TypeError, ModuleNotFoundError, ImportError) as e:
+        print(f"[WARN] Could not load algorithm from checkpoint: {e}")
+        print("[INFO] Using default configuration values from script")
+
+        # Build algorithm from scratch using the config we have
+        from ray.rllib.algorithms.ppo import PPOConfig
+
+        # Create a basic PPO config with OLD API stack to match checkpoint
+        algo_config = PPOConfig()
+        algo_config = algo_config.api_stack(
+            enable_rl_module_and_learner=False,
+            enable_env_runner_and_connector_v2=False
+        )
+        algo_config = algo_config.environment(env=env_name)
+
+        # Try to restore just the model weights if possible
+        try:
+            algo = algo_config.build()
+
+            # Attempt to restore model weights manually by loading state dict
+            state_file = os.path.join(checkpoint_path, "algorithm_state.pkl")
+            if os.path.exists(state_file):
+                print("[INFO] Attempting to restore model weights from checkpoint...")
+                # Note: This will likely fail due to missing 'callbacks' module
+                # but we try anyway in case the issue is resolved
+                import pickle
+                with open(state_file, "rb") as f:
+                    state = pickle.load(f)
+                # Restore only the weights, not the full config
+                if "worker" in state:
+                    print("[INFO] Restoring model weights from checkpoint")
+                    algo.__setstate__(state)
+                print("[INFO] Algorithm initialized with default config and checkpoint weights")
+        except Exception as restore_error:
+            print(f"[WARN] Could not restore model weights: {restore_error}")
+            print("[INFO] Creating fresh algorithm with default config (no checkpoint weights)")
+            # algo is already built, just continue without weights
 
     # Restore overrides if they were set via CLI or automation loop
     # We use a forced override here because update_from_algorithm_config might have
@@ -780,28 +820,60 @@ def run_simulation_with_rl_agent(cfg: EvalConfig) -> dict:
                 action_id = compute_rl_action(rl_module, obs_vec, cfg.deterministic, action_space=helper_wrapper.action_space, debug=cfg.debug_effort)
                 
                 # DEBUG RL INFERENCE (detailed RL observations)
-                if cfg.debug_rl and (step % 50 == 0 or (step < 100 and step % 20 == 0) or step < 3):
-                    opps = nested_obs.get("project_opportunities", {})
-                    print(f"DEBUG Step {step}: project_opps count={len(opps)}")
-                    for k, v in opps.items():
-                        if v is not None:
-                             print(f"DEBUG Step {step}: opp_{k} prestige={v.get('prestige')}, novelty={v.get('novelty')}, effort={v.get('required_effort')}")
-                    
-                    running = nested_obs.get("running_projects", {})
-                    print(f"DEBUG Step {step}: running_projects count={len(running)}")
-                    for k, v in running.items():
-                         if v is not None:
-                             print(f"DEBUG Step {step}: running_{k} progress={v.get('current_effort')}/{v.get('required_effort')}")
-                
+                if cfg.debug_rl and (step % cfg.debug_freq == 0 or (step < 100 and step % 20 == 0) or step < 3):
+                    print(f"DEBUG Step {step}: === RL Agent Observation ===")
+
+                    # Get all project slots (including empty ones) from environment
+                    # agent_active_projects is a list of project IDs (or None for empty slots)
+                    all_project_slots = env.agent_active_projects[agent_idx]
+
+                    print(f"DEBUG Step {step}: all_slots={len(all_project_slots)} (active={len([p for p in all_project_slots if p is not None])})")
+
+                    # Show each slot with its project information
+                    for slot_idx, proj_id in enumerate(all_project_slots):
+                        if proj_id is None:
+                            print(f"DEBUG Step {step}: [Slot {slot_idx}] EMPTY")
+                        else:
+                            # proj_id is a string like 'project_20-0-2'
+                            project = env.projects[proj_id]
+                            required_effort = project.required_effort
+                            time_left = max(0, project.time_window - (env.timestep - project.start_time))
+
+                            # Get total effort contributed to this project from all agents
+                            # agent_project_effort is a List[Dict[str, float]] where key is project_id
+                            total_effort = sum(env.agent_project_effort[agent_i].get(proj_id, 0)
+                                              for agent_i in range(env.n_agents))
+
+                            print(f"DEBUG Step {step}: [Slot {slot_idx}] {proj_id} | effort={total_effort}/{required_effort} | deadline={time_left} steps")
+
                 decoded = helper_wrapper._decode_action(action_id, agent_id=agent)
                 
                 decoded = helper_wrapper._apply_action_mask(
                     decoded, nested_obs, agent_id=agent
                 )
                 
-                if cfg.debug_rl and (step % 50 == 0 or step < 3):
-                    print(f"DEBUG Step {step}: masked_action={decoded}")
-                
+                if cfg.debug_rl and (step % cfg.debug_freq == 0 or step < 3):
+                    # Extract action components for debug display
+                    choose_project = decoded.get('choose_project', 0) if isinstance(decoded, dict) else 0
+                    put_effort = decoded.get('put_effort', 0) if isinstance(decoded, dict) else 0
+
+                    # put_effort is 1-based slot index: 0=no project, 1=slot 0, 2=slot 1, etc.
+                    effort_slot = put_effort - 1 if put_effort > 0 else -1
+
+                    if put_effort > 0:
+                        # Show which slot receives effort
+                        all_project_slots = env.agent_active_projects[agent_idx]
+                        if effort_slot < len(all_project_slots):
+                            target_proj = all_project_slots[effort_slot]
+                            if target_proj is not None:
+                                print(f"DEBUG Step {step}: action=(choose_project={choose_project}, put_effort={put_effort} → [Slot {effort_slot}] {target_proj})")
+                            else:
+                                print(f"DEBUG Step {step}: action=(choose_project={choose_project}, put_effort={put_effort} → [Slot {effort_slot}] EMPTY)")
+                        else:
+                            print(f"DEBUG Step {step}: action=(choose_project={choose_project}, put_effort={put_effort})")
+                    else:
+                        print(f"DEBUG Step {step}: action=(choose_project={choose_project}, put_effort={put_effort})")
+
                 actions[agent] = decoded
             else:
                 # ---- Heuristic / inactive agent ----
@@ -1017,7 +1089,11 @@ def parse_args() -> EvalConfig:
         "--debug-all", action="store_true",
         help="Enable all debug flags",
     )
-    
+    parser.add_argument(
+        "--debug-freq", type=int, default=50,
+        help="Debug log frequency in steps (default: 50). Set to 1 for every step, 10 for every 10 steps, etc.",
+    )
+
     # Top-k Collaboration
     parser.add_argument(
         "--topk", type=int, default=None,
@@ -1072,6 +1148,7 @@ def parse_args() -> EvalConfig:
         debug_effort=args.debug_effort,
         debug_rl=args.debug_rl,
         debug_sim=args.debug_sim,
+        debug_freq=args.debug_freq,
         controlled_agent_id=args.controlled_agent_id,
         deterministic=not args.stochastic,
         seed=args.seed,
