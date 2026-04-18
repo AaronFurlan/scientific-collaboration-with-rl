@@ -859,8 +859,8 @@ class PeerGroupEnvironment(ParallelEnv):
         #         f"Activated {len(agents_activated_in_step)} agents in step {self.timestep}"
         #     )
 
-        if not all([a is not None for a in agents_activated_in_step]):
-            print("No more agents to activate!")
+        # if not all([a is not None for a in agents_activated_in_step]):
+        #     print("No more agents to activate!")
         # Prepare next obs/mask
         observations = {}
         for agent in self.agents:
@@ -912,7 +912,7 @@ class PeerGroupEnvironment(ParallelEnv):
                 [np.nansum(self.agent_rewards[idx, :])], dtype=np.float32
             ),
             "peer_centroids": np.array(peer_centroids, dtype=np.float64),
-            "peer_h_index": np.array([self.agent_h_indexes[idx]], dtype=np.int16),
+            "peer_h_index": np.array([self.agent_h_indexes[idx]], dtype=np.int32),
             "self_centroid": np.array([self_centroid], dtype=np.float64),
             "project_opportunities": self._get_open_projects_obs(idx),
             "running_projects": self._get_running_projects_obs(idx, peer_group),
@@ -984,7 +984,7 @@ class PeerGroupEnvironment(ParallelEnv):
                     0, 1e4, (self.max_peer_group_size,), dtype=np.float32
                 ),
                 "peer_h_index": Box(
-                    0, 1e5, (self.max_peer_group_size,), dtype=np.int16
+                    0, 1e5, (self.max_peer_group_size,), dtype=np.int32
                 ),
                 "peer_centroids": Box(
                     -1, 1, (self.max_peer_group_size, 2), dtype=np.float64

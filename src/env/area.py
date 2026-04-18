@@ -4,6 +4,9 @@ from collections import defaultdict
 import matplotlib.pyplot as plt
 import numpy as np
 
+import sys
+import src.env.area as area_module
+
 
 class Area:
     def __init__(self, xlim=(0, 100), ylim=(0, 100), rng=None):
@@ -67,6 +70,12 @@ class Area:
     @staticmethod
     def load(filename):
         """Unpickle a Area object from a file."""
+
+        # Ensure 'env' module is available for pickle to find 'env.Area'
+        # This handles cases where the object was pickled with 'env.Area' as its class
+        if "env" not in sys.modules:
+            sys.modules["env"] = area_module
+
         with open(filename, "rb") as f:
             return pickle.load(f)
 
