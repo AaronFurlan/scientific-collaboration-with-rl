@@ -54,7 +54,6 @@ from ray import tune
 from typing import Any, Callable, Dict, Optional
 from ray.rllib.algorithms.ppo import PPOConfig
 from ray.rllib.algorithms.appo import APPOConfig
-from ray.rllib.algorithms.dreamerv3 import DreamerV3Config
 from lightning.pytorch import seed_everything
 
 from src.agent_policies import (
@@ -71,7 +70,6 @@ from src.callbacks.papers_metrics_callback import PapersMetricsCallback
 from src.checkpoint_utils import build_checkpoint_path
 
 os.environ["RAY_ACCEL_ENV_VAR_OVERRIDE_ON_ZERO"] = "0"
-os.environ["PYTHONWARNINGS"] = "ignore::DeprecationWarning"
 os.environ["PYTHONWARNINGS"] = "ignore::DeprecationWarning"
 
 # Helper: safe float conversion
@@ -1065,56 +1063,17 @@ def main(
                 },
             )
         )
-    elif algo.upper() == "DREAMERV3":
-        config = (
-            DreamerV3Config()
-            .api_stack(
-                enable_rl_module_and_learner=True,
-                enable_env_runner_and_connector_v2=True,
-            )
-            .environment(
-                env=env_name,
-                env_config={
-                    "n_agents": n_agents,
-                    "start_agents": start_agents,
-                    "max_steps": max_steps,
-                    "max_rewardless_steps": max_rewardless_steps,
-                    "n_groups": n_groups,
-                    "max_peer_group_size": max_peer_group_size,
-                    "n_projects_per_step": n_projects_per_step,
-                    "max_projects_per_agent": max_projects_per_agent,
-                    "max_agent_age": max_agent_age,
-                    "acceptance_threshold": acceptance_threshold,
-                    "reward_function": reward_function,
-                    "info_action": info_action,
-                    "info_interval": info_intervall,
-                    "debug_effort": debug_effort,
-                    "evaluation": False,
-                },
-            )
-            .framework(framework)
-            .training(
-                model_size="XS",
-                training_ratio=1024,
-                batch_size_B=16,
-                batch_length_T=32,
-                gamma=gamma,
-                world_model_lr=lr,
-                actor_lr=lr,
-                critic_lr=lr,
-            )
-        )
-        # DreamerV3 requires special handling for action masking if used.
-        # It doesn't support the standard 'action_mask' in observation out of the box
-        # in a way that filters the categorical distribution automatically.
-        # But we can try to run it.
     else:
         raise ValueError(f"Unsupported algorithm: {algo}")
 
     # RLlib handles workers through config.env_runners()
+    config = _set_rollout_workers_compat(config, num_workers=num_workers)
     config = config.env_runners(
         rollout_fragment_length=rollout_fragment_length,
         num_envs_per_env_runner=num_envs_per_worker,
+        # Create env on local worker to ensure space inference works 
+        # even if num_env_runners=0 or remote workers are slow.
+        create_env_on_local_worker=True,
         # Allow more time for sampling in complex CPU environments
         sample_timeout_s=3600,
     )
@@ -1233,20 +1192,13 @@ def main(
     if info_action:
         _num_workers = 1
         config = _set_rollout_workers_compat(config, num_workers=_num_workers)
-        # We already handled evaluation runners above, but here we can force it to 0 if info_action
+        # Force evaluation to 0 if info_action
         config = config.evaluation(evaluation_num_env_runners=0, evaluation_interval=0)
     else:
         # Each worker runs its own environment and collects samples in parallel.
         _num_workers = num_workers
         config = _set_rollout_workers_compat(config, num_workers=_num_workers)
 
-    # Rebuild the algorithm with evaluation enabled
-    config = config.env_runners(
-        rollout_fragment_length=rollout_fragment_length,
-        num_envs_per_env_runner=num_envs_per_worker,
-        # Allow more time for sampling in complex CPU environments
-        sample_timeout_s=3600,
-    )
     # Ensure fault tolerance is also active for the final config
     config = config.fault_tolerance(
         restart_failed_env_runners=True,
@@ -1658,8 +1610,8 @@ if __name__ == "__main__":
         "--algo",
         type=str,
         default="PPO",
-        choices=["PPO", "APPO", "DREAMERV3"],
-        help='RL algorithm to use: "PPO", "APPO", or "DREAMERV3"',
+        choices=["PPO", "APPO"],
+        help='RL algorithm to use: "PPO" or "APPO" (for DreamerV3 use train_dreamerv3.py)',
     )
 
     # RLlib
@@ -1691,10 +1643,10 @@ if __name__ == "__main__":
     # Env knobs (keep small for PPO + macro-action)
     parser.add_argument("--n-agents", type=int, default=400)
     parser.add_argument("--start-agents", type=int, default=100)
-    parser.add_argument("--max-steps", type=int, default=400)
+    parser.add_argument("--max-steps", type=int, default=600)
     parser.add_argument("--max-rewardless-steps", type=int, default=50)
     parser.add_argument("--n-groups", type=int, default=10)
-    parser.add_argument("--max-peer-group-size", type=int, default=100)
+    parser.add_argument("--max-peer-group-size", type=int, default=40)
     parser.add_argument("--n-projects-per-step", type=int, default=1)
     parser.add_argument("--max-projects-per-agent", type=int, default=8)
     parser.add_argument("--max-agent-age", type=int, default=750)
@@ -1775,7 +1727,7 @@ if __name__ == "__main__":
                         help="Path to a checkpoint to restore from.")
 
     # Parallelization settings
-    parser.add_argument("--num-workers", type=int, default=6,
+    parser.add_argument("--num-workers", type=int, default=5,
                         help="Number of RLlib rollout workers.")
     parser.add_argument("--num-envs-per-worker", type=int, default=1,
                         help="Number of environments per worker.")
