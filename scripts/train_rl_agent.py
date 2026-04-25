@@ -833,7 +833,9 @@ def main(
         num_cpus=os.cpu_count() or 4,
         _system_config={
             # verlängert die Wartezeit für raylet-Startup/GCS
-            "raylet_start_wait_time_s": 60.0,
+            "raylet_start_wait_time_s": 120.0,
+            "gcs_server_request_timeout_seconds": 60.0,
+            "worker_register_timeout_seconds": 120.0,
         },
     )
 
@@ -1085,6 +1087,9 @@ def main(
         max_num_env_runner_restarts=10,
         delay_between_env_runner_restarts_s=10,
         ignore_env_runner_failures=True,
+        # Allow more time for worker recovery on slow Windows machines
+        env_runner_restore_timeout_s=120.0,
+        env_runner_health_probe_timeout_s=120.0,
     )
 
     # ------------------------------------------------------------------
@@ -1381,6 +1386,7 @@ def main(
                         iteration=i,
                         max_rewardless_steps=max_rewardless_steps,
                         eval_return=eval_return_val,
+                        wandb_run_id=wandb_run.id if use_wandb else None,
                         tag="best",
                     )
                     os.makedirs(chkpt_dir, exist_ok=True)
@@ -1424,6 +1430,7 @@ def main(
                         iteration=i,
                         max_rewardless_steps=max_rewardless_steps,
                         eval_return=eval_return_val if has_valid_eval else None,
+                        wandb_run_id=wandb_run.id if use_wandb else None,
                         tag="periodic",
                     )
                     os.makedirs(chkpt_dir, exist_ok=True)
@@ -1641,15 +1648,15 @@ if __name__ == "__main__":
     parser.add_argument("--seed", type=int, default=42)
 
     # Env knobs (keep small for PPO + macro-action)
-    parser.add_argument("--n-agents", type=int, default=400)
-    parser.add_argument("--start-agents", type=int, default=100)
-    parser.add_argument("--max-steps", type=int, default=600)
-    parser.add_argument("--max-rewardless-steps", type=int, default=50)
-    parser.add_argument("--n-groups", type=int, default=10)
-    parser.add_argument("--max-peer-group-size", type=int, default=40)
-    parser.add_argument("--n-projects-per-step", type=int, default=1)
-    parser.add_argument("--max-projects-per-agent", type=int, default=8)
-    parser.add_argument("--max-agent-age", type=int, default=750)
+    parser.add_argument("--n-agents", type=int, default=400) # 400
+    parser.add_argument("--start-agents", type=int, default=100) # 100
+    parser.add_argument("--max-steps", type=int, default=600) # 600
+    parser.add_argument("--max-rewardless-steps", type=int, default=50) # 50
+    parser.add_argument("--n-groups", type=int, default=10) # 10
+    parser.add_argument("--max-peer-group-size", type=int, default=40) # 40
+    parser.add_argument("--n-projects-per-step", type=int, default=1) # 1
+    parser.add_argument("--max-projects-per-agent", type=int, default=8) # 8
+    parser.add_argument("--max-agent-age", type=int, default=750) # 750
 
     # Reward knobs
     parser.add_argument("--acceptance-threshold", type=float, default=0.44)
@@ -1711,7 +1718,7 @@ if __name__ == "__main__":
         help="Enable detailed logging for action components (raw, scaled, rounded) in the wrapper.",
     )
 
-    parser.add_argument("--train-batch-size", type=int, default=18000,
+    parser.add_argument("--train-batch-size", type=int, default=10000,
                         help="Number of env steps collected per training iteration.")
 
     parser.add_argument("--vf-share-layers", action="store_true", default=True,
@@ -1735,13 +1742,13 @@ if __name__ == "__main__":
                         help="Number of steps to collect per fragment.")
 
     # RL training hyperparameters
-    parser.add_argument("--gamma", type=float, default=0.973060999938588)
-    parser.add_argument("--lambda", dest="lambda_", type=float, default=0.9585499239587636)
-    parser.add_argument("--lr", type=float, default=0.00004299021945559274)
-    parser.add_argument("--num-epochs", type=int, default=6)
-    parser.add_argument("--entropy-coeff", type=float, default=0.0005)
-    parser.add_argument("--vf-loss-coeff", type=float, default=2.5)
-    parser.add_argument("--grad-clip", type=float, default=0.47456641063621474)
+    parser.add_argument("--gamma", type=float, default=0.9583432181048404)
+    parser.add_argument("--lambda", dest="lambda_", type=float, default=0.9626992994491804)
+    parser.add_argument("--lr", type=float, default=0.00020375077263171516)
+    parser.add_argument("--num-epochs", type=int, default=3)
+    parser.add_argument("--entropy-coeff", type=float, default=0.005515494202562797)
+    parser.add_argument("--vf-loss-coeff", type=float, default=1.941963717117803)
+    parser.add_argument("--grad-clip", type=float, default=0.5223688871667344)
 
     args = parser.parse_args()
 

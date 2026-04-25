@@ -685,7 +685,7 @@ def run_simulation_with_rl_agent(cfg: EvalConfig) -> dict:
         cfg: Fully specified evaluation config.
 
     Returns:
-        Results dict (also saved to log/<prefix>_summary.json).
+        Results dict (also saved to eval_results/<prefix>_summary.json).
     """
     # CRITICAL: Save requested overrides BEFORE any restoration or sync happens
     # We only override if the value was provided via CLI (not None)
@@ -914,8 +914,10 @@ def run_simulation_with_rl_agent(cfg: EvalConfig) -> dict:
 
     # ---- 5) Set up logging (same as run_policy_simulation.py) ----
     stats = SimulationStats()
+    output_dir = "eval_results"
+    os.makedirs(output_dir, exist_ok=True)
     log = SimLog(
-        "log",
+        output_dir,
         f"{cfg.output_file_prefix}_actions.jsonl",
         f"{cfg.output_file_prefix}_observations.jsonl",
         f"{cfg.output_file_prefix}_projects.json",
@@ -1141,7 +1143,7 @@ def run_simulation_with_rl_agent(cfg: EvalConfig) -> dict:
         **rl_status.final_summary(env),
     }
 
-    summary_path = f"log/{cfg.output_file_prefix}_summary.json"
+    summary_path = os.path.join(output_dir, f"{cfg.output_file_prefix}_summary.json")
     with open(summary_path, "w") as f:
         json.dump(results, f, indent=2)
     print(f"Summary saved to: {summary_path}")
@@ -1233,7 +1235,7 @@ def parse_args() -> EvalConfig:
 
     # Agent control
     parser.add_argument("--controlled-agent-id", type=str, default="agent_0")
-    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--seed", type=int, default=101)
     parser.add_argument(
         "--stochastic", action="store_true",
         help="Use stochastic (exploratory) actions instead of greedy",
@@ -1393,6 +1395,15 @@ if __name__ == "__main__":
         reward_functions = ["multiply"]
 
     start_seed = base_config.seed
+
+    # Validate seed range [101 - 200]
+    if not (101 <= start_seed <= 200):
+        print(f"[ERROR] Start seed {start_seed} is out of range [101 - 200].")
+        sys.exit(1)
+    
+    if start_seed + num_seeds - 1 > 200:
+        print(f"[ERROR] Seed range [{start_seed} - {start_seed + num_seeds - 1}] exceeds maximum allowed seed 200.")
+        sys.exit(1)
 
     for reward_fn in reward_functions:
         print(f"\n{'='*60}")

@@ -42,7 +42,7 @@ def sweep_train():
             "max_steps": 600,
             "max_rewardless_steps": 50,
             "n_groups": 10,
-            "max_peer_group_size": 100,
+            "max_peer_group_size": 40,
             "n_projects_per_step": 1,
             "max_projects_per_agent": 8,
             "max_agent_age": 750,
@@ -107,42 +107,42 @@ def create_sweep_config(project_name="game-of-science-sweeps"):
         "parameters": {
             "lr": {
                 "distribution": "log_uniform_values",
-                "min": 4e-5,
-                "max": 5e-5
+                "min": 1e-5,
+                "max": 5e-4
             },
             "entropy_coeff": {
                 "distribution": "log_uniform_values",
-                "min": 0.001,
-                "max": 0.02
+                "min": 0.005,
+                "max": 0.008
             },
             "vf_loss_coeff": {
                 "distribution": "uniform",
-                "min": 1.8,
+                "min": 1.9,
                 "max": 2.0
             },
             "grad_clip": {
                 "distribution": "uniform",
-                "min": 0.4,
-                "max": 0.5
+                "min": 0.50,
+                "max": 0.54
             },
             "vf_share_layers": {
-                "values": [True, False]
+                "values": [True]
             },
             "gamma": {
                 "distribution": "uniform",
-                "min": 0.970,
-                "max": 0.975
+                "min": 0.958,
+                "max": 0.96
             },
             "lambda_": {
                 "distribution": "uniform",
-                "min": 0.955,
-                "max": 0.97
+                "min": 0.959,
+                "max": 0.963
             },
             "num_epochs": {
-                "values": [4, 5, 6]
+                "values": [3, 4]
             },
             "train_batch_size": {
-                "values": [18000]
+                "values": [8000, 10000, 12000]
             },
             "total_env_steps": {
                 "value": 300000
