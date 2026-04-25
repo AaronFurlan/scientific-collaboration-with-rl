@@ -38,6 +38,7 @@ class PeerGroupEnvironment(ParallelEnv):
         acceptance_threshold: float = 0.5,
         reward_mode: str = "multiply",
         render_mode: Optional[str] = None,
+        use_light_policy_obs: bool = False,
     ) -> None:
         self.n_agents: int = max_agents
         self.n_steps: int = max_steps
@@ -47,6 +48,7 @@ class PeerGroupEnvironment(ParallelEnv):
         self.n_projects_per_step: int = n_projects_per_step
         self.max_projects_per_agent: int = max_projects_per_agent
         self.max_agent_age: int = max_agent_age
+        self.use_light_policy_obs: bool = use_light_policy_obs
         # RL Reproducibility: dedicated RNG instance
         self.rng: np.random.Generator = np.random.default_rng()
         self.age_distribution = GaussianMixture(
@@ -59,7 +61,8 @@ class PeerGroupEnvironment(ParallelEnv):
         self.max_rewardless_steps: int = max_rewardless_steps
         self.growth_rate: float = growth_rate
         self.acceptance_threshold: float = acceptance_threshold
-        self.render_mode: Optional[str] = render_mode
+        self.render_mode: Optional[str] = None
+        self.debug_light_obs: bool = False # TEMP: Zeitmessung
 
         self.possible_agents: List[str] = [f"agent_{i}" for i in range(self.n_agents)]
         self.agent_to_id: Dict[str, int] = {
@@ -287,7 +290,10 @@ class PeerGroupEnvironment(ParallelEnv):
         self._clear_space_cache()
         observations = {}
         for agent in self.agents:
-            obs = self._get_observation(agent)
+            if self.use_light_policy_obs:
+                obs = self._get_policy_observation(agent)
+            else:
+                obs = self._get_observation(agent)
             mask = self._get_action_mask(agent)
             self.observations[agent] = obs
             self.action_masks[agent] = mask
@@ -862,11 +868,29 @@ class PeerGroupEnvironment(ParallelEnv):
         # Prepare next obs/mask
         observations = {}
         for agent in self.agents:
-            obs = self._get_observation(agent)
-            mask = self._get_action_mask(agent)
-            self.observations[agent] = obs
-            self.action_masks[agent] = mask
-            observations[agent] = {"observation": obs, "action_mask": mask}
+            if self.use_light_policy_obs:
+                # If light obs is enabled, we only pre-build masks and store light obs in self.observations
+                # but the RETURNED observations dict must still be consistent.
+                # Since the wrapper will use _get_policy_observation anyway, we just provide masks here.
+                mask = self._get_action_mask(agent)
+                self.action_masks[agent] = mask
+                # We still need to return something that won't crash callers.
+                # ParallelEnv usually expects all observations.
+                # To be minimally invasive, if light obs is enabled, we only build full obs 
+                # for the agents that actually need it (controlled by the wrapper).
+                # But here we don't know which one is controlled.
+                
+                # REVISED: If use_light_policy_obs is True, we build LIGHT observations for everyone
+                # and let the wrapper request a full one if needed.
+                obs = self._get_policy_observation(agent)
+                self.observations[agent] = obs
+                observations[agent] = {"observation": obs, "action_mask": mask}
+            else:
+                obs = self._get_observation(agent)
+                mask = self._get_action_mask(agent)
+                self.observations[agent] = obs
+                self.action_masks[agent] = mask
+                observations[agent] = {"observation": obs, "action_mask": mask}
         infos = {a: {} for a in self.agents}
         
         return observations, self.rewards, terminations, truncations, infos
@@ -913,10 +937,60 @@ class PeerGroupEnvironment(ParallelEnv):
             "peer_centroids": np.array(peer_centroids, dtype=np.float64),
             "peer_h_index": np.array([self.agent_h_indexes[idx]], dtype=np.int32),
             "self_centroid": np.array([self_centroid], dtype=np.float64),
+            "self_centroids": np.array([self_centroid], dtype=np.float64), # Duplicate for compatibility
             "project_opportunities": self._get_open_projects_obs(idx),
             "running_projects": self._get_running_projects_obs(idx, peer_group),
             "age": np.array([self.agent_steps[idx]], dtype=np.int32),
         }
+        return obs
+
+    def _get_policy_observation(self, agent: str) -> Dict[str, Any]:
+        """
+        Lightweight observation building for fixed archetype policies.
+        Only includes fields used by src/agent_policies.py.
+        """
+        idx = self.agent_to_id[agent]
+        peer_group = np.array(
+            self.peer_groups[self.agent_peer_idx[idx]], dtype=np.int32
+        )
+        
+        # Only orthodox_scientist uses centroids
+        peer_centroids = np.zeros((self.max_peer_group_size, 2), dtype=np.float64)
+        self_centroid = np.array([0, 0])
+        peer_group_active = np.zeros(self.max_peer_group_size, dtype=np.int8)
+        peer_reputation = np.zeros((self.max_peer_group_size), dtype=np.float32)
+
+        for i, agent_i in enumerate(peer_group):
+            if self.active_agents[agent_i] == 1:
+                peer_group_active[i] = 1
+                peer_reputation[i] = np.nansum(self.agent_rewards[agent_i, :])
+                
+                # Centroids are only needed for some policies, but we include them here
+                # to keep it consistent. We can optimize further if needed.
+                centroids = np.array(
+                    [self.projects[pid].kene for pid in self.agent_successful_projects[agent_i]]
+                )
+                if len(centroids) == 0:
+                    peer_centroids[i] = self.peer_group_centroids[self.agent_peer_idx[agent_i]]
+                else:
+                    peer_centroids[i] = centroids.mean(axis=0)
+                if agent_i == idx:
+                    self_centroid = peer_centroids[i]
+
+        obs = {
+            "peer_group": peer_group_active,
+            "peer_reputation": peer_reputation,
+            "accumulated_rewards": np.array([np.nansum(self.agent_rewards[idx, :])], dtype=np.float32),
+            "peer_centroids": peer_centroids,
+            "self_centroids": np.array([self_centroid], dtype=np.float64),
+            "self_centroid": np.array([self_centroid], dtype=np.float64), # compat
+            "project_opportunities": self._get_open_projects_obs(idx),
+            "running_projects": self._get_policy_running_projects_obs(idx, peer_group),
+            "age": np.array([self.agent_steps[idx]], dtype=np.int32),
+            "peer_h_index": np.array([self.agent_h_indexes[idx]], dtype=np.int32),
+        }
+        if self.debug_light_obs:
+            print("Using lightweight running_projects obs")
         return obs
 
     def _get_open_projects_obs(self, agent_idx: int) -> List[Dict[str, Any]]:
@@ -969,6 +1043,48 @@ class PeerGroupEnvironment(ParallelEnv):
             )
             del p["start_time"]
             del p["time_window"]
+            running_obs[f"project_{p_idx}"] = p
+        return running_obs
+
+    def _get_policy_running_projects_obs(
+        self, agent_idx: int, peer_group: np.ndarray
+    ) -> Dict[str, Dict[str, Any]]:
+        """
+        Lightweight version of _get_running_projects_obs for fixed archetype policies.
+        Avoids expensive lookups and large loop over the entire peer group.
+        """
+        running_obs = {}
+        # Create a mapping from agent_id to its index in the peer group for O(1) lookup
+        peer_to_idx = {agent_id: i for i, agent_id in enumerate(peer_group)}
+        
+        for p_idx in self._get_active_projects(agent_idx):
+            proj_obj = self.projects[p_idx]
+            
+            # Behavioral compatibility: policies use len(contributors) and np.sum(peer_fit)
+            # which expect arrays of size max_peer_group_size.
+            contributors_mask = np.zeros(self.max_peer_group_size, dtype=np.int8)
+            fit_mask = np.zeros(self.max_peer_group_size, dtype=np.float32)
+            
+            # Map only actual contributors that are in the peer group
+            for i, contributor_id in enumerate(proj_obj.contributors):
+                if contributor_id in peer_to_idx:
+                    p_group_idx = peer_to_idx[contributor_id]
+                    contributors_mask[p_group_idx] = 1
+                    fit_mask[p_group_idx] = proj_obj.peer_fit[i]
+            
+            # Basic project data
+            p = {
+                "required_effort": np.array([proj_obj.required_effort], dtype=np.int32),
+                "prestige": np.array([proj_obj.prestige], dtype=np.float32),
+                "novelty": np.array([proj_obj.novelty], dtype=np.float32),
+                "current_effort": np.array([proj_obj.current_effort], dtype=np.float32),
+                "time_left": np.array(
+                    [max(0, proj_obj.time_window - (self.timestep - proj_obj.start_time))],
+                    dtype=np.int32,
+                ),
+                "contributors": contributors_mask,
+                "peer_fit": fit_mask
+            }
             running_obs[f"project_{p_idx}"] = p
         return running_obs
 
