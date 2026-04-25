@@ -579,6 +579,7 @@ def make_env_creator(
     info_action: bool = False,
     info_interval: int = 50,
     debug_effort: bool = False,
+    use_light_policy_obs: bool = False,
 ) -> Callable[[Optional[Dict[str, Any]]], Any]:
     """
     Returns an RLlib-compatible env creator: f(env_config) -> gymnasium.Env
@@ -644,6 +645,7 @@ def make_env_creator(
             acceptance_threshold=env_config.get("acceptance_threshold", acceptance_threshold),
             reward_mode=env_config.get("reward_function", reward_function),
             render_mode=None,
+            use_light_policy_obs=use_light_policy_obs,
         )
 
         # 2) Create fixed-policy assignments (same logic as run_policy_simulation.py)
@@ -724,6 +726,7 @@ def main(
     info_action: bool = False,
     info_intervall: int = 50,
     debug_effort: bool = False,
+    use_light_policy_obs: bool = False,
     train_batch_size: int = 18000,
     # Checkpoint options
     save_every_n_iters: int = 50,
@@ -971,6 +974,7 @@ def main(
         info_action=info_action,
         info_interval=info_intervall,
         debug_effort=debug_effort,
+        use_light_policy_obs=use_light_policy_obs,
     )
     tune.register_env(env_name, env_creator)
 
@@ -1717,6 +1721,12 @@ if __name__ == "__main__":
         action="store_true",
         help="Enable detailed logging for action components (raw, scaled, rounded) in the wrapper.",
     )
+    parser.add_argument(
+        "--use-light-policy-obs",
+        action="store_true",
+        default=False,
+        help="If set, uses lightweight observations for heuristic agents to speed up training.",
+    )
 
     parser.add_argument("--train-batch-size", type=int, default=10000,
                         help="Number of env steps collected per training iteration.")
@@ -1784,6 +1794,7 @@ if __name__ == "__main__":
         info_action=args.info_action,
         info_intervall=args.info_intervall,
         debug_effort=args.debug_effort,
+        use_light_policy_obs=args.use_light_policy_obs,
         train_batch_size=args.train_batch_size,
         save_every_n_iters=args.save_every_n_iters,
         evaluation_interval=args.evaluation_interval,
