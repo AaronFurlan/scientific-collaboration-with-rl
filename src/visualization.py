@@ -17,7 +17,11 @@ from src.analysis import (
     quality_per_project
 )
 
-def topic_area_per_project(projects, actions, area_pickle_file):
+def topic_area_per_project(projects, actions, area_pickle_file, observations=None, **kwargs):
+    """
+    Visualisiert die Verteilung der Projekte im Knowledge Space, nach Archetypen farblich markiert.
+    Hebt den RL-Agenten hervor, falls observations vorhanden sind.
+    """
     area = Area.load(area_pickle_file)
     papers = []
     agent_to_archetype = {}
@@ -52,18 +56,34 @@ def topic_area_per_project(projects, actions, area_pickle_file):
 
         papers.append((*p["kene"], main_archetype))
 
+    # Extrahiere RL Agent Positionen aus Observations
+    rl_agent_positions = []
+    if observations and rl_agent_id:
+        for step in observations:
+            if rl_agent_id in step:
+                obs = step[rl_agent_id].get("observation", {})
+                centroid = obs.get("self_centroid")
+                if centroid:
+                    # centroid ist oft [[x, y]]
+                    if isinstance(centroid, list) and len(centroid) > 0:
+                        if isinstance(centroid[0], list):
+                            rl_agent_positions.append(tuple(centroid[0]))
+                        else:
+                            rl_agent_positions.append(tuple(centroid))
+
     # Custom visualization to highlight RL agent
     print("\n--- Publications per Archetype ---")
     arch_counts = Counter([p[2] for p in papers])
     for arch in ["careerist", "orthodox_scientist", "mass_producer", "rl_agent"]:
         print(f"{arch:18}: {arch_counts.get(arch, 0)}")
 
-    visualize_knowledge_space(area, sampled_points=papers)
+    visualize_knowledge_space(area, sampled_points=papers, agent_positions=rl_agent_positions)
 
 
-def visualize_knowledge_space(area, resolution=200, sampled_points=None, bounds=None):
+def visualize_knowledge_space(area, resolution=200, sampled_points=None, bounds=None, agent_positions=None):
     """
     Modified version of Area.visualize to better highlight the RL agent.
+    Optional: agent_positions can be a list of (x, y) tuples representing the agent's trajectory.
     """
     if bounds is None:
         xmin, xmax = area.xlim
@@ -147,13 +167,26 @@ def visualize_knowledge_space(area, resolution=200, sampled_points=None, bounds=
             plt.scatter(px, py, c="black", s=10, edgecolors="white", label="Papers")
 
     plt.legend(loc="upper left", bbox_to_anchor=(1.15, 1))
+
+    # Plot RL Agent trajectory/final position if provided
+    if agent_positions and len(agent_positions) > 0:
+        axs, ays = zip(*agent_positions)
+        # Plot trajectory
+        plt.plot(axs, ays, color="red", linestyle="--", linewidth=1, alpha=0.5, label="RL Agent Path")
+        # Plot final position
+        plt.scatter(axs[-1], ays[-1], color="red", marker="X", s=200, edgecolors="black", linewidth=2, label="RL Agent Final Pos", zorder=10)
+
     plt.title("Knowledge Space with Published Papers")
     plt.xlabel("Topic Dimension 1")
     plt.ylabel("Topic Dimension 2")
+    
+    # Update legend to include RL Agent trajectory if it was added
+    plt.legend(loc="upper left", bbox_to_anchor=(1.15, 1))
+    
     plt.tight_layout()
     plt.show()
 
-def animate_knowledge_space(projects, actions, area_pickle_file, interval=200, steps_per_frame=5):
+def animate_knowledge_space(projects, actions, area_pickle_file, interval=200, steps_per_frame=5, observations=None):
     """
     Erstellt eine Animation des Knowledge Space über die Zeit.
     """
@@ -169,6 +202,17 @@ def animate_knowledge_space(projects, actions, area_pickle_file, interval=200, s
                     rl_agent_id = agent
                 if agent not in agent_to_archetype:
                     agent_to_archetype[agent] = arch
+
+    # Extrahiere RL Agent Trajektorie
+    rl_traj = []
+    if observations and rl_agent_id:
+        for step_idx, step in enumerate(observations):
+            if rl_agent_id in step:
+                obs = step[rl_agent_id].get("observation", {})
+                centroid = obs.get("self_centroid")
+                if centroid and isinstance(centroid, list) and len(centroid) > 0:
+                    pos = centroid[0] if isinstance(centroid[0], list) else centroid
+                    rl_traj.append({"time": step_idx, "x": pos[0], "y": pos[1]})
 
     # Vorbereitung der Paper-Daten mit Zeitstempel
     paper_data = []
@@ -223,14 +267,33 @@ def animate_knowledge_space(projects, actions, area_pickle_file, interval=200, s
         else:
             scatters[arch] = ax.scatter([], [], c=color, s=20, alpha=0.6, edgecolors="white", label=arch, zorder=3)
 
+    # Agent Trajectory Line and Current Position Marker
+    agent_path, = ax.plot([], [], color="red", linestyle="--", linewidth=1, alpha=0.5, zorder=4, label="RL Agent Path")
+    agent_pos = ax.scatter([], [], color="red", marker="X", s=150, edgecolors="black", linewidth=2, zorder=10, label="RL Agent Current")
+
     ax.legend(loc="upper left", bbox_to_anchor=(1, 1))
     title = ax.set_title("Knowledge Space Evolution - Step 0")
 
-    max_time = max([p["time"] for p in paper_data]) if paper_data else 100
+    # Bestimme max_time aus Paper-Daten und Trajektorie
+    paper_times = [p["time"] for p in paper_data] if paper_data else [0]
+    traj_times = [t["time"] for t in rl_traj] if rl_traj else [0]
+    max_time = max(max(paper_times), max(traj_times), 100)
+    
     frames = range(0, int(max_time) + 1, steps_per_frame)
 
     def update(frame):
         current_papers = [p for p in paper_data if p["time"] <= frame]
+        
+        # Trajektorie bis zum aktuellen Frame
+        current_traj = [t for t in rl_traj if t["time"] <= frame]
+        if current_traj:
+            tx = [t["x"] for t in current_traj]
+            ty = [t["y"] for t in current_traj]
+            agent_path.set_data(tx, ty)
+            agent_pos.set_offsets([[tx[-1], ty[-1]]])
+        else:
+            agent_path.set_data([], [])
+            agent_pos.set_offsets(np.empty((0, 2)))
 
         # Gruppieren nach Archetyp
         arch_groups = defaultdict(list)
@@ -245,7 +308,7 @@ def animate_knowledge_space(projects, actions, area_pickle_file, interval=200, s
                     scatters[arch].set_offsets(np.empty((0, 2)))
 
         title.set_text(f"Knowledge Space Evolution - Step {frame}")
-        return list(scatters.values()) + [title]
+        return list(scatters.values()) + [agent_path, agent_pos, title]
 
     ani = animation.FuncAnimation(fig, update, frames=frames, interval=interval, blit=True)
     plt.close()  # Verhindert doppelte Anzeige im Notebook
