@@ -371,8 +371,12 @@ class PeerGroupEnvironment(ParallelEnv):
             ## Find the biggest overlap of collaborators on the same project as the largest clique in the collaboration graph
             grouped_collaborators = set()
             running_project_idx = None
+            
+            graph = nx.from_numpy_array(intents)
+            cliques = list(nx.find_cliques(graph))
+            
             for collaborators in sorted(
-                list(nx.find_cliques(nx.from_numpy_array(intents))),
+                cliques,
                 key=len,
                 reverse=True,
             ):
@@ -647,8 +651,9 @@ class PeerGroupEnvironment(ParallelEnv):
                     self.agent_project_effort[idx][effort_project_id] += effort_amount
                 else:
                     print(f"Couldn't find project: {selected_project}")
+        
         # Collaboration intents (for each agent, with their peers)
-        for peer_group in self.peer_groups:
+        for pg_idx, peer_group in enumerate(self.peer_groups):
             peer_group = np.array((peer_group))
             peer_group_choices: List[Optional[int]] = [
                 agent_project_choices.get(pc_idx, None) for pc_idx in peer_group
@@ -695,7 +700,7 @@ class PeerGroupEnvironment(ParallelEnv):
                     self._find_project_setting(
                         choice, collaborator_group, collaborators_intents
                     )
-
+        
         # Check project completion and assign rewards
         self.rewards = {a: 0.0 for a in self.agents}
         published_projects = [
@@ -771,7 +776,7 @@ class PeerGroupEnvironment(ParallelEnv):
                     for p in new_projects
                 ],
             )
-
+        
         in_window_rewards = self.agent_rewards[
             self.active_agents.astype(bool),
             max(0, self.timestep - self.max_rewardless_steps) : self.timestep,
@@ -791,7 +796,7 @@ class PeerGroupEnvironment(ParallelEnv):
                 else:
                     self.rewardless_steps[idx] += 1
                 active_idx += 1
-
+        
         truncations = {a: False for a in self.agents}
         # Drop agents randomly way more likely with too many rewardless steps or max timesteps
 
@@ -854,13 +859,6 @@ class PeerGroupEnvironment(ParallelEnv):
         # regenerate open projects
         self._generate_projects()
 
-        # if len(agents_activated_in_step) > 0:
-        #     print(
-        #         f"Activated {len(agents_activated_in_step)} agents in step {self.timestep}"
-        #     )
-
-        # if not all([a is not None for a in agents_activated_in_step]):
-        #     print("No more agents to activate!")
         # Prepare next obs/mask
         observations = {}
         for agent in self.agents:
@@ -870,6 +868,7 @@ class PeerGroupEnvironment(ParallelEnv):
             self.action_masks[agent] = mask
             observations[agent] = {"observation": obs, "action_mask": mask}
         infos = {a: {} for a in self.agents}
+        
         return observations, self.rewards, terminations, truncations, infos
 
     def _get_observation(self, agent: str) -> Dict[str, Any]:
@@ -984,7 +983,7 @@ class PeerGroupEnvironment(ParallelEnv):
                     0, 1e4, (self.max_peer_group_size,), dtype=np.float32
                 ),
                 "peer_h_index": Box(
-                    0, 1e5, (self.max_peer_group_size,), dtype=np.int32
+                    0, 1e4, (self.max_peer_group_size,), dtype=np.int16
                 ),
                 "peer_centroids": Box(
                     -1, 1, (self.max_peer_group_size, 2), dtype=np.float64
