@@ -49,7 +49,7 @@ from src.agent_policies import (
     do_nothing_policy,
     get_policy_function,
 )
-from src.env.env_versions.peer_group_environment_1 import PeerGroupEnvironment
+from src.env.peer_group_environment import PeerGroupEnvironment
 from src.rllib_single_agent_wrapper import RLLibSingleAgentWrapper
 from scripts.log_simulation import SimLog
 from src.stats_tracker import SimulationStats
@@ -85,17 +85,17 @@ class EvalConfig:
 
     # Environment  [must-match-training]
     # We use None as default to force sync from checkpoint if not provided via CLI
-    n_agents: Optional[int] = None
-    start_agents: Optional[int] = None
+    n_agents: Optional[int] = 80
+    start_agents: Optional[int] = 20
     max_steps: Optional[int] = 600
-    max_rewardless_steps: Optional[int] = None
-    n_groups: Optional[int] = None
-    max_peer_group_size: Optional[int] = None       # ← macro-action size depends on this
-    n_projects_per_step: Optional[int] = None
-    max_projects_per_agent: Optional[int] = None
-    max_agent_age: Optional[int] = None
-    acceptance_threshold: Optional[float] = None
-    reward_function: Optional[str] = None
+    max_rewardless_steps: Optional[int] = 100
+    n_groups: Optional[int] = 4
+    max_peer_group_size: Optional[int] = 60       # ← macro-action size depends on this
+    n_projects_per_step: Optional[int] = 1
+    max_projects_per_agent: Optional[int] = 6
+    max_agent_age: Optional[int] = 1000
+    acceptance_threshold: Optional[float] = 0.5
+    reward_function: Optional[str] = "multiply"
 
     # Heuristic thresholds  [must-match-training]
     prestige_threshold: float = 0.2
@@ -307,6 +307,15 @@ def build_eval_wrapper(
       - macro-action decoding is identical
       - action mask repair + top-k collaboration behave the same
     """
+    # CRITICAL FIX for older Wrapper versions:
+    # We must ensure observation_space is ready BEFORE the wrapper is initialized.
+    try:
+        env.reset(seed=cfg.seed)
+        if hasattr(env, "observation_space"):
+            _ = env.observation_space(cfg.controlled_agent_id)
+    except Exception as e:
+        print(f"[WARN] Pre-initialization in build_eval_wrapper failed: {e}")
+
     return RLLibSingleAgentWrapper(
         env,
         controlled_agent=cfg.controlled_agent_id,
@@ -333,6 +342,26 @@ def make_env_creator_from_config(cfg: EvalConfig) -> Callable:
              run_cfg.update_from_algorithm_config(env_config)
         
         env = build_env(run_cfg)
+        
+        # --- CRITICAL FIX FOR COMPATIBILITY ---
+        # The rolled-back RLLibSingleAgentWrapper expects observation_space to be ready in __init__.
+        # If it's None, it crashes with RuntimeError.
+        # We MUST ensure it's populated.
+        
+        try:
+            # 1. Force environment initialization
+            env.reset(seed=run_cfg.seed)
+            
+            # 2. Warm up the observation space cache for agent_0
+            # This is what the wrapper calls in line 163 (or similar)
+            ref_agent = run_cfg.controlled_agent_id
+            if hasattr(env, "observation_space"):
+                obs_space = env.observation_space(ref_agent)
+                if hasattr(obs_space, "shape"):
+                     print(f"[INFO] Environment initialized. Raw observation vector size: {obs_space.shape[0]} (before wrapper flattening)")
+        except Exception as e:
+            print(f"[WARN] Warming up env failed: {e}")
+
         agent_policies = build_heuristic_population(run_cfg)
         other_policies = build_other_policies(env, agent_policies, run_cfg)
         return build_eval_wrapper(env, other_policies, run_cfg)
@@ -449,6 +478,84 @@ def compute_rl_action(
     # If it's the Box case (CB + 2 or 2*(CB+2)):
     action = model_out[0].cpu().numpy()
     return action
+
+
+def debug_obs_diff(vec1, vec2):
+    print("len1:", len(vec1), "len2:", len(vec2))
+    min_len = min(len(vec1), len(vec2))
+    if min_len == 0:
+        print("mean diff:", 0.0)
+        print("max diff:", 0.0)
+        return
+    diff = np.abs(vec1[:min_len] - vec2[:min_len])
+    print("mean diff:", float(diff.mean()))
+    print("max diff:", float(diff.max()))
+
+
+def debug_eval_obs_pipeline(
+    wrapper: RLLibSingleAgentWrapper,
+    nested_obs: Dict[str, Any],
+    obs_vec_from_flatten: np.ndarray,
+    model_expected_size: int,
+    *,
+    verbose: bool,
+) -> None:
+    raw_obs = nested_obs.get("observation", {}) if isinstance(nested_obs, dict) else {}
+    raw_mask = nested_obs.get("action_mask", {}) if isinstance(nested_obs, dict) else {}
+
+    normalized_obs = wrapper._normalize_observation(raw_obs)
+    obs_only_vec = wrapper._flatten_any_like_template(normalized_obs, wrapper._obs_template)
+    mask_vec = wrapper._flatten_mask_like_template(raw_mask, wrapper._mask_template)
+    recomposed = np.concatenate([obs_only_vec, mask_vec]).astype(np.float32, copy=False)
+
+    cp_raw = np.asarray(raw_mask.get("choose_project", []), dtype=np.float32).ravel()
+    cb_raw = np.asarray(raw_mask.get("collaborate_with", []), dtype=np.float32).ravel()
+    pe_raw = np.asarray(raw_mask.get("put_effort", []), dtype=np.float32).ravel()
+
+    cp_tmpl = np.asarray(wrapper._mask_template.get("choose_project", []), dtype=np.float32).ravel()
+    cb_tmpl = np.asarray(wrapper._mask_template.get("collaborate_with", []), dtype=np.float32).ravel()
+    pe_tmpl = np.asarray(wrapper._mask_template.get("put_effort", []), dtype=np.float32).ravel()
+
+    print("EVAL obs_vec size:", len(obs_vec_from_flatten))
+    print("MODEL expected size:", model_expected_size)
+    print("WRAPPER expected size:", wrapper.expected_obs_size)
+    print("EVAL observation size (ohne mask):", len(obs_only_vec))
+    print("EVAL action_mask size:", len(mask_vec))
+    print("EVAL total recomposed size:", len(recomposed))
+    print("EVAL mask raw sizes: choose_project=", len(cp_raw), "collaborate_with=", len(cb_raw), "put_effort=", len(pe_raw))
+    print(
+        "EVAL mask template sizes: choose_project=",
+        len(cp_tmpl),
+        "collaborate_with=",
+        len(cb_tmpl),
+        "put_effort=",
+        len(pe_tmpl),
+    )
+
+    running_projects = raw_obs.get("running_projects", {}) if isinstance(raw_obs, dict) else {}
+    print("EVAL running_projects raw keys:", len(running_projects) if isinstance(running_projects, dict) else "not-dict")
+    print("EVAL has put_effort mask key:", "put_effort" in raw_mask if isinstance(raw_mask, dict) else False)
+    print("EVAL has choose_project mask key:", "choose_project" in raw_mask if isinstance(raw_mask, dict) else False)
+    print("EVAL has collaborate_with mask key:", "collaborate_with" in raw_mask if isinstance(raw_mask, dict) else False)
+
+    if verbose:
+        print("EVAL diff flatten_to_vector vs recomposed:")
+        debug_obs_diff(obs_vec_from_flatten, recomposed)
+
+        # Feature-length mismatches against template (top-level keys)
+        if isinstance(wrapper._obs_template, dict) and isinstance(normalized_obs, dict):
+            mismatches = []
+            for key in sorted(wrapper._obs_template.keys()):
+                tmpl_val = wrapper._obs_template[key]
+                obs_val = normalized_obs.get(key, tmpl_val)
+                exp_len = int(wrapper._flatten_any_like_template(tmpl_val, tmpl_val).size)
+                got_len = int(wrapper._flatten_any_like_template(obs_val, tmpl_val).size)
+                if exp_len != got_len:
+                    mismatches.append((key, exp_len, got_len))
+            if mismatches:
+                print("EVAL feature length mismatches (template vs runtime):")
+                for key, exp_len, got_len in mismatches:
+                    print(f"  - {key}: expected {exp_len}, got {got_len}, delta={exp_len - got_len}")
 
 
 # ---------------------------------------------------------------------------
@@ -649,8 +756,13 @@ def run_simulation_with_rl_agent(cfg: EvalConfig) -> dict:
                     config_to_sync = config_to_sync.to_dict()
                 
                 # IMPORTANT: Deep sync from algorithm_state.pkl to avoid size mismatch
-                # print(f"[SYNC] Pre-syncing from {state_file}...")
+                print(f"[SYNC] Pre-syncing configuration from {state_file}...")
                 cfg.update_from_algorithm_config(config_to_sync)
+                
+                # Print what we found in the env_config to help debug size mismatches
+                env_cfg = config_to_sync.get("env_config", config_to_sync)
+                if isinstance(env_cfg, dict):
+                    print(f"  -> Found in checkpoint: max_projects_per_agent={env_cfg.get('max_projects_per_agent')}, max_peer_group_size={env_cfg.get('max_peer_group_size')}")
         except Exception as e:
             print(f"[WARN] Could not pre-sync config from {state_file}: {e}")
 
@@ -767,6 +879,22 @@ def run_simulation_with_rl_agent(cfg: EvalConfig) -> dict:
     policy = algo.get_policy()
     rl_module = policy.model
     rl_module.eval()
+    model_expected_size = 0
+    try:
+        if hasattr(policy, "observation_space") and getattr(policy.observation_space, "shape", None):
+            model_expected_size = int(np.prod(policy.observation_space.shape))
+    except Exception:
+        model_expected_size = 0
+    if model_expected_size <= 0:
+        try:
+            if (
+                hasattr(rl_module, "_hidden_layers")
+                and hasattr(rl_module._hidden_layers[0], "_model")
+                and hasattr(rl_module._hidden_layers[0]._model[0], "in_features")
+            ):
+                model_expected_size = int(rl_module._hidden_layers[0]._model[0].in_features)
+        except Exception:
+            model_expected_size = 0
 
     env = build_env(cfg)
     agent_policies = build_heuristic_population(cfg)
@@ -803,6 +931,7 @@ def run_simulation_with_rl_agent(cfg: EvalConfig) -> dict:
         agent_id=cfg.controlled_agent_id,
         agent_idx=env.agent_to_id[cfg.controlled_agent_id],
     )
+    eval_obs_debug_printed = False
 
     for step in range(cfg.max_steps):
         # ---- Snapshot RL agent state BEFORE stepping ----
@@ -816,6 +945,42 @@ def run_simulation_with_rl_agent(cfg: EvalConfig) -> dict:
                 # ---- RL agent: flatten → infer → decode → mask-repair ----
                 nested_obs = observations[agent]
                 obs_vec = helper_wrapper._flatten_to_vector(nested_obs)
+                obs_vec = helper_wrapper._ensure_obs_vector_ok(obs_vec, where="eval")
+
+                # --- VALIDATION: Check for observation size mismatch before inference ---
+                if not eval_obs_debug_printed:
+                    debug_eval_obs_pipeline(
+                        helper_wrapper,
+                        nested_obs,
+                        obs_vec,
+                        model_expected_size,
+                        verbose=True,
+                    )
+                    eval_obs_debug_printed = True
+
+                if model_expected_size > 0 and len(obs_vec) != model_expected_size:
+                    debug_eval_obs_pipeline(
+                        helper_wrapper,
+                        nested_obs,
+                        obs_vec,
+                        model_expected_size,
+                        verbose=True,
+                    )
+                    print(f"\n[CRITICAL ERROR] Observation size mismatch!")
+                    print(f"  Model expects: {model_expected_size} features")
+                    print(f"  Environment produces: {len(obs_vec)} features")
+                    print(f"  Wrapper expected: {helper_wrapper.expected_obs_size} features")
+                    print(f"  Current Config: max_peer_group_size={cfg.max_peer_group_size}, max_projects_per_agent={cfg.max_projects_per_agent}")
+
+                    # Provide helpful suggestions for common mismatches
+                    print("\n  POSSIBLE FIXES:")
+                    if model_expected_size == 451 and cfg.max_projects_per_agent == 8 and cfg.max_peer_group_size == 40:
+                        print("  -> Try setting max_projects_per_agent = 10 (gives 451 features)")
+                    elif model_expected_size == 412 and cfg.max_projects_per_agent == 10 and cfg.max_peer_group_size == 40:
+                        print("  -> Try setting max_projects_per_agent = 8 (gives 412 features)")
+
+                    print(f"  Please adjust these parameters in the MANUAL OVERRIDES block at the end of the script.\n")
+                    raise RuntimeError(f"Input mismatch: Model expects {model_expected_size}, got {len(obs_vec)}")
 
                 action_id = compute_rl_action(rl_module, obs_vec, cfg.deterministic, action_space=helper_wrapper.action_space, debug=cfg.debug_effort)
                 
@@ -951,6 +1116,12 @@ def run_simulation_with_rl_agent(cfg: EvalConfig) -> dict:
         if all(terminations.values()):
             if cfg.debug_sim:
                 print(f"Simulation ended at step {step}")
+            break
+
+        # ---- Safety stop: no active agents left ----
+        if int(np.sum(env.active_agents)) == 0:
+            if cfg.debug_sim:
+                print(f"Simulation ended at step {step}: no active agents left")
             break
 
     # ---- 7) Save results ----
@@ -1158,6 +1329,44 @@ def parse_args() -> EvalConfig:
 
 if __name__ == "__main__":
     base_config, num_seeds, all_rewards = parse_args()
+
+    # --- MANUAL PARAMETER OVERRIDES ---
+    # Hier können alle Parameter manuell gesetzt werden, um CLI-Argumente zu überschreiben.
+    # Dies ist nützlich, wenn der Checkpoint-Sync fehlschlägt oder man schnell testen will.
+    # HINWEIS: Wenn diese Werte gesetzt sind, werden sie bevorzugt gegenüber den Werten aus dem Checkpoint verwendet!
+    
+    # Checkpoint
+    # base_config.checkpoint_path = "checkpoints/my_checkpoint"
+    
+    # Environment Parameter (Beispielwerte für 451 Features)
+    ENABLE_MANUAL_OVERRIDES = False
+    if ENABLE_MANUAL_OVERRIDES:
+        base_config.n_agents = 60
+        base_config.start_agents = 100
+        base_config.max_steps = 600
+        base_config.max_rewardless_steps = 50
+        base_config.n_groups = 10
+        base_config.max_peer_group_size = 10
+        base_config.n_projects_per_step = 1
+        base_config.max_projects_per_agent = 8
+        base_config.max_agent_age = 750
+        base_config.acceptance_threshold = 0.44
+
+        # Heuristik-Schwellenwerte
+        base_config.prestige_threshold = 0.29
+        base_config.novelty_threshold = 0.4
+        base_config.effort_threshold = 35
+
+        # Simulation
+        base_config.deterministic = True
+        base_config.seed = 42
+    
+    # Debugging
+    # base_config.debug_sim = True
+    # base_config.debug_rl = True
+    # base_config.debug_effort = True
+    
+    # ----------------------------------
 
     # Move ray.init() outside the simulation loop to avoid re-init issues
     # and improve performance.
