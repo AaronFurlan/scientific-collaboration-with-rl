@@ -17,3 +17,8 @@ python .\scripts\run_policy_simulation_with_rlagent.py --num-seeds 1 --seed 42 -
  python .\scripts\train_rl_agent.py --iterations 5 --wandb-mode disabled --train-batch-size 1200 --max-peer-group-size 10 --n-groups 10 --n-agents 60
 ```
 
+## Training `train_rl_agent.py`
+````bash
+python .\scripts\train_rl_agent.py --iterations 100 --seed 1 --wandb-group "Default_Setup1" 
+````
+

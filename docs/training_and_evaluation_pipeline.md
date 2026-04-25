@@ -1,5 +1,21 @@
 # # Documentation: process_rl_results.py
 
+1. Sweep / coarse search
+   seed 42, 300k env steps
+
+2. Validation / model selection
+   Top configs auf seeds 101–110 evaluieren
+
+3. Final training
+   beste Config mit train seeds 1–5 trainieren
+   je 100 Iterationen / ca. 1 Mio env steps
+
+4. Final test
+   jedes der 5 Modelle auf test seeds 201–210 testen
+
+5. Reporting
+   mean ± std über 5 × 10 = 50 Evaluations
+
 ## Overview
 
 This project trains a **PPO reinforcement learning agent** in the Game of Science environment using RLlib.
