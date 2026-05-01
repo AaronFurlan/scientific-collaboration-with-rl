@@ -126,7 +126,6 @@ class EvalConfig:
 
     # Output
     output_file_prefix: str = "rl_agent_sim"
-    output_dir: str = "test_results"
 
     @property
     def policy_distribution(self) -> Dict[str, float]:
@@ -161,7 +160,6 @@ class EvalConfig:
         print(f"  topk_collab={self.topk_collab}, "
               f"topk_all_agents={self.topk_apply_to_all_agents}")
         print(f"  debug: effort={self.debug_effort}, rl={self.debug_rl}, sim={self.debug_sim}")
-        print(f"  output_dir:          {self.output_dir}")
         print(f"  output_prefix:       {self.output_file_prefix}")
         print(f"{'='*60}\n")
 
@@ -326,6 +324,7 @@ def build_eval_wrapper(
         topk_collab=cfg.topk_collab,
         topk_apply_to_all_agents=cfg.topk_apply_to_all_agents,
         debug_effort=cfg.debug_effort,
+        is_evaluation=True,
     )
 
 
@@ -687,7 +686,7 @@ def run_simulation_with_rl_agent(cfg: EvalConfig) -> dict:
         cfg: Fully specified evaluation config.
 
     Returns:
-        Results dict (also saved to test_results/<prefix>_summary.json).
+        Results dict (also saved to eval_results/<prefix>_summary.json).
     """
     # CRITICAL: Save requested overrides BEFORE any restoration or sync happens
     # We only override if the value was provided via CLI (not None)
@@ -916,26 +915,8 @@ def run_simulation_with_rl_agent(cfg: EvalConfig) -> dict:
 
     # ---- 5) Set up logging (same as run_policy_simulation.py) ----
     stats = SimulationStats()
-    # Path relative to project root
-    project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-    
-    # Create a unique output directory for this run
-    # If multiple seeds/rewards are run, they each get their own subfolder
-    from datetime import datetime
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    
-    # We use the user-provided output_dir as base
-    base_output_dir = cfg.output_dir
-    if not os.path.isabs(base_output_dir):
-        base_output_dir = os.path.join(project_root, base_output_dir)
-        
-    # Subdirectory name based on prefix, reward, seed and timestamp
-    # This ensures each run is isolated
-    run_dir_name = f"{cfg.output_file_prefix}_{timestamp}_s{cfg.seed}"
-    output_dir = os.path.join(base_output_dir, run_dir_name)
-    
+    output_dir = "eval_results"
     os.makedirs(output_dir, exist_ok=True)
-    
     log = SimLog(
         output_dir,
         f"{cfg.output_file_prefix}_actions.jsonl",
@@ -945,9 +926,7 @@ def run_simulation_with_rl_agent(cfg: EvalConfig) -> dict:
     log.start()
 
     # ---- 6) Reset environment and run simulation ----
-    observations, infos = env.reset(seed=cfg.seed)
-    # Sync wrapper internal state so _flatten_to_vector template is built
-    helper_wrapper._last_observations = observations
+    observations, infos = helper_wrapper.reset(seed=cfg.seed)
 
     rl_status = RLAgentStatus(
         agent_id=cfg.controlled_agent_id,
@@ -1253,18 +1232,15 @@ def parse_args() -> EvalConfig:
     parser.add_argument("--novelty-threshold", type=float, default=0.8)
     parser.add_argument("--effort-threshold", type=int, default=22)
 
+    # Agent control
     parser.add_argument("--controlled-agent-id", type=str, default="agent_0")
-    parser.add_argument("--seed", type=int, default=501)
+    parser.add_argument("--seed", type=int, default=101)
     parser.add_argument(
         "--stochastic", action="store_true",
         help="Use stochastic (exploratory) actions instead of greedy",
     )
 
     # Output
-    parser.add_argument(
-        "--output-dir", type=str, default="test_results",
-        help="Directory for log output files (default: test_results/)",
-    )
     parser.add_argument(
         "--output-prefix", type=str, default="rl_agent_sim",
         help="Prefix for log output files",
@@ -1349,7 +1325,6 @@ def parse_args() -> EvalConfig:
         deterministic=not args.stochastic,
         seed=args.seed,
         output_file_prefix=args.output_prefix,
-        output_dir=args.output_dir,
     ), args.num_seeds, args.all_rewards
 
 
@@ -1420,18 +1395,18 @@ if __name__ == "__main__":
 
     start_seed = base_config.seed
 
-    # Validate seed range [201 - 300]
-    if not (501 <= start_seed <= 991):
-        print(f"[ERROR] Start seed {start_seed} is out of range [201 - 291].")
+    # Validate seed range [101 - 500]
+    if not (101 <= start_seed <= 500):
+        print(f"[ERROR] Start seed {start_seed} is out of range [101 - 500].")
         sys.exit(1)
     
-    if start_seed + num_seeds - 1 > 1000:
-        print(f"[ERROR] Seed range [{start_seed} - {start_seed + num_seeds - 1}] exceeds maximum allowed seed 300.")
+    if start_seed + num_seeds - 1 > 500:
+        print(f"[ERROR] Seed range [{start_seed} - {start_seed + num_seeds - 1}] exceeds maximum allowed seed 500.")
         sys.exit(1)
 
     for reward_fn in reward_functions:
         print(f"\n{'='*60}")
-        print(f"STARTING TESTING FOR REWARD FUNCTION: {reward_fn}")
+        print(f"STARTING EVALUATION FOR REWARD FUNCTION: {reward_fn}")
         print(f"{'='*60}\n")
         
         for i in range(num_seeds):
