@@ -2,6 +2,47 @@ import json
 import pandas as pd
 import os
 import argparse
+import re
+from datetime import datetime
+from tqdm import tqdm
+
+def find_latest_log_files(base_dir, strategy, seed):
+    """
+    Finds the latest actions and observations files for a given strategy and seed.
+    Looks for subdirectories like rl_ppo_{strategy}_s{seed}_{timestamp}_s{seed}/
+    """
+    pattern = re.compile(f"rl_ppo_{strategy}_s{seed}_(\\d{{8}}_\\d{{6}})_s{seed}")
+    
+    candidates = []
+    if not os.path.exists(base_dir):
+        return None, None
+
+    for entry in os.listdir(base_dir):
+        full_path = os.path.join(base_dir, entry)
+        if os.path.isdir(full_path):
+            match = pattern.match(entry)
+            if match:
+                timestamp_str = match.group(1)
+                try:
+                    ts = datetime.strptime(timestamp_str, "%Y%m%d_%H%M%S")
+                    candidates.append((ts, full_path))
+                except ValueError:
+                    continue
+    
+    if not candidates:
+        return None, None
+    
+    # Sort by timestamp descending
+    candidates.sort(key=lambda x: x[0], reverse=True)
+    latest_dir = candidates[0][1]
+    
+    actions_file = os.path.join(latest_dir, f"rl_ppo_{strategy}_s{seed}_actions.jsonl")
+    obs_file = os.path.join(latest_dir, f"rl_ppo_{strategy}_s{seed}_observations.jsonl")
+    
+    if os.path.exists(actions_file) and os.path.exists(obs_file):
+        return actions_file, obs_file
+    
+    return None, None
 
 def build_reward_dataframe(reward_steps, agents, seed):
     """
@@ -91,21 +132,24 @@ def build_reward_summary_by_archetype(reward_steps, agents, seed, strategy):
 
 def main():
     parser = argparse.ArgumentParser(description="Process RL simulation log files and generate summary Parquet files.")
-    parser.add_argument("log_dir", type=str, help="Path to the directory containing the simulation log files (.jsonl)")
-    parser.add_argument("--out-dir", type=str, default="results", help="Directory where the result Parquet files will be saved (default: 'results')")
+    parser.add_argument("--log-dir", type=str, default="test_results", help="Path to the directory containing the simulation log subdirectories (default: 'test_results')")
+    parser.add_argument("--out-base-dir", type=str, default="results", help="Base directory where the result Parquet files will be saved (default: 'results')")
+    parser.add_argument("--start-seed", type=int, default=501, help="Starting seed for evaluation (default: 501)")
+    parser.add_argument("--num-seeds", type=int, default=20, help="Number of seeds to evaluate (default: 20)")
     
     args = parser.parse_args()
 
-    # RL Evaluation seeds as per your proposal: 101 to 110
-    seeds = range(101, 111)
-    
-    # Prefix from run_policy_simulation_with_rlagent.py (default or your convention)
-    # Hint: You should name your logs consistently, e.g. "rl_ppo_multiply_s101_actions.jsonl"
+    seeds = range(args.start_seed, args.start_seed + args.num_seeds)
     strategies = ["multiply", "evenly", "by_effort"]
     
     log_dir = args.log_dir
-    out_dir = args.out_dir
+    
+    # Create timestamped subfolder in results
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    out_dir = os.path.join(args.out_base_dir, f"aggregation_{timestamp}")
     os.makedirs(out_dir, exist_ok=True)
+    
+    print(f"Aggregation started. Results will be saved to: {out_dir}")
 
     for name in strategies:
         all_summaries = []
@@ -113,20 +157,21 @@ def main():
         
         print(f"\nProcessing strategy: {name}")
         
-        for seed in seeds:
-            # IMPORTANT: Matches the file name pattern you should use in your eval loop
-            actions_file = os.path.join(log_dir, f"rl_ppo_{name}_s{seed}_actions.jsonl")
-            obs_file = os.path.join(log_dir, f"rl_ppo_{name}_s{seed}_observations.jsonl")
+        for seed in tqdm(seeds, desc=f"Seeds ({name})", unit="seed"):
+            actions_file, obs_file = find_latest_log_files(log_dir, name, seed)
             
-            if not os.path.exists(actions_file) or not os.path.exists(obs_file):
-                print(f"  [Warning] Skipping seed {seed}: Files not found ({actions_file})")
+            if not actions_file or not obs_file:
+                # tqdm.write preserves the progress bar
+                # tqdm.write(f"  [Warning] Skipping seed {seed}: Files not found in {log_dir}")
                 continue
             
-            print(f"  Reading seed {seed}...")
             with open(actions_file, "r") as f:
                 actions = [json.loads(line) for line in f]
             with open(obs_file, "r") as f:
                 observations = [json.loads(line) for line in f]
+
+            if not observations or not actions:
+                continue
 
             df_all = build_reward_dataframe(observations, actions, seed)
             df_summary = build_reward_summary_by_archetype(observations, actions, seed, name)
@@ -148,6 +193,8 @@ def main():
             print(f"  DONE: Saved RL trajectories to {trajectories_out}")
         else:
             print(f"  [Error] No data found for strategy {name}")
+
+    print(f"\nAll strategies processed. Final results in: {out_dir}")
 
 if __name__ == "__main__":
     main()

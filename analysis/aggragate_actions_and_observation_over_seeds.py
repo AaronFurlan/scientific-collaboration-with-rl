@@ -1,191 +1,348 @@
 import json
-import pandas as pd
-import os
-import argparse
 import re
-from datetime import datetime
-from tqdm import tqdm
-import numpy as np
+import argparse
+from pathlib import Path
+from typing import Any
 
-def find_latest_log_files(base_dir, strategy, seed):
-    """
-    Findet die neuesten Actions- und Observations-Dateien für eine gegebene Strategie und einen Seed.
-    Sucht nach Unterverzeichnissen wie rl_ppo_{strategy}_s{seed}_{timestamp}_s{seed}/
-    """
-    pattern = re.compile(f"rl_ppo_{strategy}_s{seed}_(\\d{{8}}_\\d{{6}})_s{seed}")
-    
-    candidates = []
-    if not os.path.exists(base_dir):
-        return None, None
+import pandas as pd
+import pyarrow as pa
+import pyarrow.parquet as pq
 
-    for entry in os.listdir(base_dir):
-        full_path = os.path.join(base_dir, entry)
-        if os.path.isdir(full_path):
-            match = pattern.match(entry)
-            if match:
-                timestamp_str = match.group(1)
-                try:
-                    ts = datetime.strptime(timestamp_str, "%Y%m%d_%H%M%S")
-                    candidates.append((ts, full_path))
-                except ValueError:
-                    continue
-    
-    if not candidates:
-        return None, None
-    
-    # Nach Zeitstempel absteigend sortieren
-    candidates.sort(key=lambda x: x[0], reverse=True)
-    latest_dir = candidates[0][1]
-    
-    actions_file = os.path.join(latest_dir, f"rl_ppo_{strategy}_s{seed}_actions.jsonl")
-    obs_file = os.path.join(latest_dir, f"rl_ppo_{strategy}_s{seed}_observations.jsonl")
-    
-    if os.path.exists(actions_file) and os.path.exists(obs_file):
-        return actions_file, obs_file
-    
-    return None, None
 
-def flatten_observation(obs_dict):
+def extract_seed(path: Path) -> int | None:
     """
-    Flacht eine Observation-Struktur ab, um sie in ein DataFrame-Format zu bringen.
-    Konzentriert sich auf skalare Werte und flacht Listen/Arrays ab.
-    """
-    if not obs_dict or not isinstance(obs_dict, dict):
-        return {}
-    
-    flat = {}
-    # 'observation' ist oft ein langes Array, das wir hier ggf. nicht komplett flachziehen wollen
-    # aber Metriken wie accumulated_rewards, age, etc. sind wichtig.
-    
-    if "observation" in obs_dict:
-        # Hier könnten wir das Feature-Vektor-Array speichern, falls benötigt.
-        # Aber für die Analyse sind oft die benannten Felder in 'observation' (falls vorhanden) 
-        # oder Metriken wichtiger.
-        pass
+    Extract seed number from run folder name.
 
-    for k, v in obs_dict.items():
-        if k == "observation" and isinstance(v, list):
-            # Optional: Feature-Vektor als String oder Liste belassen
-            # flat["obs_vector"] = v 
+    Patterns supported:
+    - rl_ppo_by_effort_s501_...
+    - rl_ppo_multiply_s502_...
+
+    Args:
+        path: Path to the run folder or file
+
+    Returns:
+        Seed as integer, or None if not found
+    """
+    # Look in the parent folder name (run_id)
+    folder_name = path.parent.name if path.is_file() else path.name
+
+    # Pattern: s followed by digits
+    match = re.search(r's(\d+)', folder_name)
+    if match:
+        return int(match.group(1))
+    return None
+
+
+def extract_timestamp(run_id: str) -> str | None:
+    """
+    Extract timestamp from run folder name.
+
+    Pattern: YYYYMMDD_HHMMSS
+
+    Args:
+        run_id: Run folder name
+
+    Returns:
+        Timestamp string or None if not found
+    """
+    match = re.search(r'(\d{8}_\d{6})', run_id)
+    if match:
+        return match.group(1)
+    return None
+
+
+def load_json_records(path: Path) -> list[dict]:
+    """
+    Load JSON records from a file.
+
+    Supports:
+    - Normal JSON array: [{"a": 1}, {"b": 2}]
+    - JSON object with list: {"actions": [...]} or {"observations": [...]}
+    - JSONL fallback: one JSON object per line
+
+    Args:
+        path: Path to JSON file
+
+    Returns:
+        List of record dictionaries
+    """
+    try:
+        with open(path, 'r', encoding='utf-8') as f:
+            content = f.read()
+
+        # Try parsing as normal JSON
+        try:
+            data = json.loads(content)
+
+            # If it's already a list, return it
+            if isinstance(data, list):
+                return data
+
+            # If it's a dict, look for common keys
+            if isinstance(data, dict):
+                # Try common keys
+                for key in ['actions', 'observations', 'data', 'records']:
+                    if key in data and isinstance(data[key], list):
+                        return data[key]
+
+                # If single object, wrap in list
+                return [data]
+
+        except json.JSONDecodeError:
+            # Fall back to JSONL
+            lines = content.strip().split('\n')
+            records = []
+            for line in lines:
+                line = line.strip()
+                if line:
+                    try:
+                        records.append(json.loads(line))
+                    except json.JSONDecodeError:
+                        continue
+            return records
+
+    except Exception as e:
+        print(f"  Warning: Failed to load {path}: {e}")
+        return []
+
+
+def normalize_records(records: list[dict], metadata: dict) -> pd.DataFrame:
+    """
+    Normalize records into a DataFrame with metadata columns.
+
+    Args:
+        records: List of record dictionaries
+        metadata: Dict with run_id, seed, source_file, source_type
+
+    Returns:
+        DataFrame with flattened records and metadata
+    """
+    if not records:
+        return pd.DataFrame()
+
+    # Try to normalize nested structures
+    try:
+        df = pd.json_normalize(records, max_level=2)
+    except Exception:
+        # If normalization fails, convert to DataFrame directly
+        df = pd.DataFrame(records)
+
+    # Convert columns with complex objects to JSON strings
+    for col in df.columns:
+        if df[col].dtype == 'object':
+            # Check if any value is dict or list
+            sample = df[col].dropna().head(1)
+            if len(sample) > 0:
+                val = sample.iloc[0]
+                if isinstance(val, (dict, list)):
+                    df[col] = df[col].apply(
+                        lambda x: json.dumps(x) if isinstance(x, (dict, list)) else x
+                    )
+
+    # Add metadata columns
+    for key, value in metadata.items():
+        df[key] = value
+
+    return df
+
+
+def aggregate_files(
+    input_dir: Path,
+    pattern: str,
+    source_type: str,
+    seed_start: int,
+    seed_end: int
+) -> pd.DataFrame:
+    """
+    Aggregate all files matching pattern within seed range.
+
+    Args:
+        input_dir: Directory to search
+        pattern: Glob pattern (e.g., "*_actions.json")
+        source_type: "actions" or "observations"
+        seed_start: Minimum seed (inclusive)
+        seed_end: Maximum seed (inclusive)
+
+    Returns:
+        Aggregated DataFrame
+    """
+    all_dfs = []
+    found_files = []
+    skipped_files = []
+
+    # Recursively find all matching files
+    for file_path in input_dir.rglob(pattern):
+        # Extract seed
+        seed = extract_seed(file_path)
+
+        # Filter by seed range
+        if seed is None:
+            skipped_files.append((str(file_path), "No seed found"))
             continue
-        
-        if isinstance(v, list) and len(v) == 1:
-            flat[k] = v[0]
-        elif isinstance(v, (int, float, str, bool)):
-            flat[k] = v
-    
-    return flat
 
-def build_combined_dataframe(observations, actions, seed, strategy):
-    """
-    Kombiniert Observations und Actions in ein einziges DataFrame.
-    Jede Zeile repräsentiert einen Agenten in einem Zeitschritt.
-    """
-    records = []
-    
-    # Anzahl der Schritte bestimmen (Minimum aus beiden, falls Diskrepanz)
-    num_steps = min(len(observations), len(actions))
-    
-    for step_idx in range(num_steps):
-        step_obs = observations[step_idx]
-        step_act = actions[step_idx]
-        
-        # Wir gehen davon aus, dass beide Dicts die gleichen Agenten-IDs enthalten
-        agents = set(step_obs.keys()) | set(step_act.keys())
-        
-        for agent_id in agents:
-            obs_data = step_obs.get(agent_id)
-            act_data = step_act.get(agent_id)
-            
-            # Nur aufzeichnen, wenn der Agent in diesem Schritt aktiv war (Daten vorhanden)
-            if obs_data is None and act_data is None:
-                continue
-                
-            record = {
-                "step": step_idx,
-                "agent_id": agent_id,
-                "seed": seed,
-                "strategy": strategy
-            }
-            
-            # Observation hinzufügen
-            if obs_data:
-                flat_obs = flatten_observation(obs_data)
-                record.update({f"obs_{k}": v for k, v in flat_obs.items()})
-            
-            # Action hinzufügen
-            if act_data:
-                # Actions sind oft flacher: {"choose_project": X, "put_effort": Y, "archetype": Z}
-                for k, v in act_data.items():
-                    if k == "archetype":
-                        record["archetype"] = v
-                    else:
-                        record[f"act_{k}"] = v
-            
-            records.append(record)
-            
-    return pd.DataFrame(records)
+        if seed < seed_start or seed > seed_end:
+            skipped_files.append((str(file_path), f"Seed {seed} out of range"))
+            continue
+
+        # Extract run metadata
+        run_id = file_path.parent.name
+        timestamp = extract_timestamp(run_id)
+
+        # Load records
+        records = load_json_records(file_path)
+
+        if not records:
+            skipped_files.append((str(file_path), "No records loaded"))
+            continue
+
+        # Prepare metadata
+        metadata = {
+            'run_id': run_id,
+            'seed': seed,
+            'source_file': str(file_path.relative_to(input_dir)),
+            'source_type': source_type,
+        }
+
+        if timestamp:
+            metadata['timestamp'] = timestamp
+
+        # Normalize and add to collection
+        df = normalize_records(records, metadata)
+
+        if not df.empty:
+            all_dfs.append(df)
+            found_files.append((str(file_path), seed, len(df)))
+
+    # Print summary for this source type
+    print(f"\n{source_type.capitalize()} files:")
+    print(f"  Found: {len(found_files)}")
+    if found_files:
+        seeds_included = sorted(set(seed for _, seed, _ in found_files))
+        print(f"  Seeds: {seeds_included}")
+        total_rows = sum(rows for _, _, rows in found_files)
+        print(f"  Total rows: {total_rows:,}")
+
+    if skipped_files:
+        print(f"  Skipped: {len(skipped_files)}")
+        for path, reason in skipped_files[:5]:  # Show first 5
+            print(f"    - {Path(path).name}: {reason}")
+        if len(skipped_files) > 5:
+            print(f"    ... and {len(skipped_files) - 5} more")
+
+    # Combine all DataFrames
+    if not all_dfs:
+        return pd.DataFrame()
+
+    combined = pd.concat(all_dfs, ignore_index=True)
+
+    # Sort by relevant columns
+    sort_cols = ['seed', 'run_id']
+
+    # Add step-like columns if available
+    for step_col in ['step', 'timestep', 'env_step', 'episode']:
+        if step_col in combined.columns:
+            sort_cols.append(step_col)
+            break
+
+    # Add agent_id if available
+    if 'agent_id' in combined.columns:
+        sort_cols.append('agent_id')
+
+    combined = combined.sort_values(by=sort_cols, ignore_index=True)
+
+    return combined
+
 
 def main():
-    parser = argparse.ArgumentParser(description="Aggregiert RL-Aktionen und -Observationen in ein kombiniertes Parquet-File.")
-    parser.add_argument("--log-dir", type=str, default="test_results", help="Pfad zum Log-Verzeichnis (default: 'test_results')")
-    parser.add_argument("--out-base-dir", type=str, default="results", help="Basis-Ausgabeverzeichnis (default: 'results')")
-    parser.add_argument("--start-seed", type=int, default=501, help="Start-Seed (default: 501)")
-    parser.add_argument("--num-seeds", type=int, default=20, help="Anzahl der Seeds (default: 20)")
-    
+    """Main entry point."""
+    parser = argparse.ArgumentParser(
+        description="Aggregate RL evaluation JSON files into parquet format."
+    )
+    parser.add_argument(
+        '--input-dir',
+        type=str,
+        default='test_results',
+        help='Input directory to scan (default: test_results)'
+    )
+    parser.add_argument(
+        '--output-dir',
+        type=str,
+        default='test_results/aggregated',
+        help='Output directory for parquet files (default: test_results/aggregated)'
+    )
+    parser.add_argument(
+        '--seed-start',
+        type=int,
+        default=501,
+        help='Minimum seed to include (default: 501)'
+    )
+    parser.add_argument(
+        '--seed-end',
+        type=int,
+        default=520,
+        help='Maximum seed to include (default: 520)'
+    )
+
     args = parser.parse_args()
 
-    seeds = range(args.start_seed, args.start_seed + args.num_seeds)
-    strategies = ["multiply", "evenly", "by_effort"]
-    
-    log_dir = args.log_dir
-    
-    # Zeitstempel für den Ausgabeordner
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    out_dir = os.path.join(args.out_base_dir, f"aggregation_combined_{timestamp}")
-    os.makedirs(out_dir, exist_ok=True)
-    
-    print(f"Aggregration (Combined) gestartet. Ergebnisse unter: {out_dir}")
+    # Convert to Path objects
+    input_dir = Path(args.input_dir)
+    output_dir = Path(args.output_dir)
 
-    for name in strategies:
-        all_combined_data = []
-        
-        print(f"\nVerarbeite Strategie: {name}")
-        
-        for seed in tqdm(seeds, desc=f"Seeds ({name})", unit="seed"):
-            actions_file, obs_file = find_latest_log_files(log_dir, name, seed)
-            
-            if not actions_file or not obs_file:
-                continue
-            
-            try:
-                with open(actions_file, "r") as f:
-                    actions = [json.loads(line) for line in f]
-                with open(obs_file, "r") as f:
-                    observations = [json.loads(line) for line in f]
-            except Exception as e:
-                print(f"Fehler beim Lesen der Dateien für Seed {seed}: {e}")
-                continue
+    # Validate input directory
+    if not input_dir.exists():
+        print(f"Error: Input directory '{input_dir}' does not exist")
+        return
 
-            if not observations or not actions:
-                continue
+    # Create output directory
+    output_dir.mkdir(parents=True, exist_ok=True)
 
-            df_combined = build_combined_dataframe(observations, actions, seed, name)
-            if not df_combined.empty:
-                all_combined_data.append(df_combined)
-        
-        if all_combined_data:
-            df_final = pd.concat(all_combined_data, ignore_index=True)
-            
-            output_path = os.path.join(out_dir, f"rl_combined_obs_actions_{name}.parquet")
-            df_final.to_parquet(output_path, index=False)
-            
-            print(f"  FERTIG: Kombiniertes File gespeichert unter {output_path}")
-            print(f"  Datensätze: {len(df_final)}")
-        else:
-            print(f"  [Fehler] Keine Daten für Strategie {name} gefunden.")
+    print(f"Aggregating RL evaluation files")
+    print(f"  Input: {input_dir}")
+    print(f"  Output: {output_dir}")
+    print(f"  Seed range: {args.seed_start} - {args.seed_end}")
 
-    print(f"\nAlle Strategien verarbeitet. Finale Ergebnisse in: {out_dir}")
+    # Aggregate actions (support both .json and .jsonl)
+    actions_df = aggregate_files(
+        input_dir=input_dir,
+        pattern='*_actions.json*',
+        source_type='actions',
+        seed_start=args.seed_start,
+        seed_end=args.seed_end
+    )
 
-if __name__ == "__main__":
+    # Aggregate observations (support both .json and .jsonl)
+    observations_df = aggregate_files(
+        input_dir=input_dir,
+        pattern='*_observations.json*',
+        source_type='observations',
+        seed_start=args.seed_start,
+        seed_end=args.seed_end
+    )
+
+    # Write output files
+    print("\nWriting output files:")
+
+    if not actions_df.empty:
+        actions_file = output_dir / f'actions_{args.seed_start}_{args.seed_end}.parquet'
+        actions_df.to_parquet(actions_file, index=False)
+        print(f"  ✓ {actions_file}")
+        print(f"    Rows: {len(actions_df):,}")
+        print(f"    Columns: {len(actions_df.columns)}")
+    else:
+        print("  ⚠ No actions data to write")
+
+    if not observations_df.empty:
+        obs_file = output_dir / f'observations_{args.seed_start}_{args.seed_end}.parquet'
+        observations_df.to_parquet(obs_file, index=False)
+        print(f"  ✓ {obs_file}")
+        print(f"    Rows: {len(observations_df):,}")
+        print(f"    Columns: {len(observations_df.columns)}")
+    else:
+        print("  ⚠ No observations data to write")
+
+    print("\nAggregation complete!")
+
+
+if __name__ == '__main__':
     main()
