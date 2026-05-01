@@ -27,6 +27,10 @@ active project slots semantically distinguishable.
 from __future__ import annotations
 
 from typing import Any, Callable, Dict, Iterable, List, Optional, Union
+import time
+import os
+from pathlib import Path
+from pprint import pformat
 
 import numpy as np
 import gymnasium as gym
@@ -66,6 +70,7 @@ class RLLibSingleAgentWrapper(gym.Env):
             is_evaluation: bool = False,
             debug_effort: bool = False,
             debug_effort_agent_only: bool = True,
+            env_config: Optional[Dict[str, Any]] = None,
     ):
         """Wrapper around a multi-agent env exposing a single-agent RLlib interface.
 
@@ -91,6 +96,7 @@ class RLLibSingleAgentWrapper(gym.Env):
                 to non-controlled agents (both policy-driven and random actions).
             w_rep / w_dist / w_same: Weights for the reputation, distance, and
                 same-group components of the collaboration score.
+            env_config: Optional RLlib env_config passed to the wrapper.
         """
         super().__init__()
         self.env = env
@@ -112,6 +118,13 @@ class RLLibSingleAgentWrapper(gym.Env):
         self.debug_effort = bool(debug_effort)
         self.debug_effort_agent_only = bool(debug_effort_agent_only)
 
+        # Seeding
+        env_config = env_config or {}
+        self.base_seed = int(env_config.get("base_seed", 0))
+        self.worker_index = int(env_config.get("worker_index", 0))
+        self.vector_index = int(env_config.get("vector_index", 0))
+        self._episode_counter = 0
+
         # Simple debug counters (only used if top-k is enabled)
         self._topk_calls = 0
         self._topk_pruned = 0
@@ -119,6 +132,11 @@ class RLLibSingleAgentWrapper(gym.Env):
 
         self.current_controlled: Optional[str] = None
         self._last_observations: Dict[str, Any] = {}
+
+        # One-time debug dump for first reset observations.
+        self._obs_dump_written: bool = False
+        self._obs_dump_path: Path = Path("log") / "obs_dump_first_reset.txt"
+        self._printed_obs_size_debug: bool = False
 
         self.expected_obs_size = 0
 
@@ -229,7 +247,6 @@ class RLLibSingleAgentWrapper(gym.Env):
         Now expects Dict actions with discrete choose_project and put_effort:
         {'choose_project': int, 'put_effort': int, 'collaborate_with': ndarray or float}
         """
-
         # 1. Dictionary format (PRIMARY - from RLlib policy)
         if isinstance(a, dict):
             choose_project = int(a.get("choose_project", 0))
@@ -298,14 +315,12 @@ class RLLibSingleAgentWrapper(gym.Env):
     def _apply_action_mask(self, decoded: ActionDict, nested_obs: NestedObs,
                            agent_id: Optional[str] = None) -> ActionDict:
         """Repair invalid actions using the env-provided action_mask.
-
-        Treat mask values >0 as allowed (your env sometimes uses 2).
-        If top-k collaboration ablation is enabled, further prune the
-        "collaborate_with" bit-vector to at most k partners using
-        observation-derived scores.
         """
         mask = nested_obs.get("action_mask", {})
         if not isinstance(mask, dict):
+            # Ensure collaborate_with exists and is correctly sized
+            if "collaborate_with" not in decoded or not hasattr(decoded["collaborate_with"], "size") or decoded["collaborate_with"].size != self._CB:
+                decoded["collaborate_with"] = np.zeros(self._CB, dtype=np.int8)
             return decoded
 
         # choose_project
@@ -314,7 +329,7 @@ class RLLibSingleAgentWrapper(gym.Env):
             cp = int(decoded.get("choose_project", 0))
             if cp < 0 or cp >= cp_mask.size or cp_mask[cp] <= 0:
                 decoded["choose_project"] = 0
-
+        
         # put_effort
         pe_mask = np.asarray(mask.get("put_effort", []))
         if pe_mask.size:
@@ -324,22 +339,29 @@ class RLLibSingleAgentWrapper(gym.Env):
 
         # collaborate_with
         c_mask = np.asarray(mask.get("collaborate_with", []))
-        if c_mask.size:
-            c = np.asarray(decoded.get("collaborate_with", np.zeros(self._CB, dtype=np.int8)), dtype=np.int8).copy()
-            allowed = (c_mask > 0)
+        
+        # Ensure c exists and has correct size before applying mask
+        c = np.asarray(decoded.get("collaborate_with", np.zeros(self._CB, dtype=np.int8)), dtype=np.int8).copy()
+        if c.size != self._CB:
+             c = np.zeros(self._CB, dtype=np.int8)
 
+        if c_mask.size:
+            allowed = (c_mask > 0)
             L = min(len(c), len(allowed))
+            
+            # Use slice to modify in-place if possible, but keep it safe
             c_slice = c[:L]
-            c_slice[~allowed[:L]] = 0
+            allowed_slice = allowed[:L]
+            c_slice[~allowed_slice] = 0
             c[:L] = c_slice
 
             if len(c) > L:
                 c[L:] = 0
-
+            
             # Optional top-k ablation (after mask repair)
-            if self.topk_collab is not None and self.topk_collab >= 0:
+            if hasattr(self, "topk_collab") and self.topk_collab is not None and self.topk_collab >= 0:
                 # Only apply to controlled agent or optionally to all agents
-                if agent_id is None or self.topk_apply_to_all_agents:
+                if agent_id is None or getattr(self, "topk_apply_to_all_agents", False):
                     c = self._apply_topk_collaboration(
                         c,
                         c_mask,
@@ -348,8 +370,7 @@ class RLLibSingleAgentWrapper(gym.Env):
                         k=self.topk_collab,
                     )
 
-            decoded["collaborate_with"] = c.astype(np.int8, copy=False)
-
+        decoded["collaborate_with"] = c.astype(np.int8, copy=False)
         return decoded
 
     # -----------------------------
@@ -848,20 +869,73 @@ class RLLibSingleAgentWrapper(gym.Env):
         v = np.asarray(mask)
         return (v > 0).astype(np.float32).ravel()
 
+    def get_feature_index_map(self) -> Dict[str, int]:
+        """
+        Returns a mapping from feature name (e.g. 'observation.age') to its
+        index in the flattened observation vector.
+        """
+        index_map = {}
+        current_idx = 0
+
+        def walk_obs(tmpl, prefix):
+            nonlocal current_idx
+            if isinstance(tmpl, dict):
+                for k in sorted(tmpl.keys()):
+                    walk_obs(tmpl[k], f"{prefix}.{k}")
+            else:
+                arr = np.asarray(tmpl)
+                size = arr.size
+                if size == 1:
+                    index_map[prefix] = current_idx
+                else:
+                    for i in range(size):
+                        index_map[f"{prefix}.{i}"] = current_idx + i
+                current_idx += size
+
+        def walk_mask(tmpl, prefix):
+            nonlocal current_idx
+            if isinstance(tmpl, dict):
+                for k in sorted(tmpl.keys()):
+                    walk_mask(tmpl[k], f"{prefix}.{k}")
+            else:
+                arr = np.asarray(tmpl)
+                size = arr.size
+                if size == 1:
+                    index_map[prefix] = current_idx
+                else:
+                    for i in range(size):
+                        index_map[f"{prefix}.{i}"] = current_idx + i
+                current_idx += size
+
+        walk_obs(self._obs_template, "observation")
+        walk_mask(self._mask_template, "action_mask")
+
+        return index_map
     # -----------------------------
     # Gymnasium API
     # -----------------------------
 
     def reset(self, *, seed=None, options=None):
-        logger.debug("Wrapper.reset() called; delegating to env.reset(seed=%s)", seed)
-        observations, infos = self.env.reset(seed=seed, options=options)
-        self._last_observations = observations
-        self._t = 0
+        self._episode_counter += 1
 
-        # RL Reproducibility: seed wrapper's own action_space so that
-        # fallback sampling (for agents without policies) is deterministic
-        if seed is not None:
-            self.action_space.seed(seed)
+        if not self.is_evaluation:
+            ss = np.random.SeedSequence([
+                self.base_seed,
+                self.worker_index,
+                self.vector_index,
+                self._episode_counter,
+            ])
+            episode_seed = int(ss.generate_state(1, dtype=np.uint32)[0])
+            logger.debug("TRAINING: Episode %d, generated seed %d", self._episode_counter, episode_seed)
+            observations, infos = self.env.reset(seed=episode_seed, options=options)
+            
+            # Explicitly pass seed to action_space for deterministic training behavior if needed
+            self.action_space.seed(episode_seed)
+        else:
+            logger.debug("EVALUATION: Episode %d, using provided seed %s", self._episode_counter, seed)
+            observations, infos = self.env.reset(seed=seed, options=options)
+            if seed is not None:
+                self.action_space.seed(seed)
 
         # choose controlled agent
         if callable(self._choose_controlled):
@@ -871,6 +945,18 @@ class RLLibSingleAgentWrapper(gym.Env):
         else:
             self.current_controlled = next(iter(observations.keys()))
 
+        if getattr(self.env, "use_light_policy_obs", False):
+            if self.current_controlled in observations:
+                # Re-build FULL observation for controlled agent
+                full_obs = self.env._get_observation(self.current_controlled)
+                observations[self.current_controlled]["observation"] = full_obs
+                # Update env's internal storage
+                self.env.observations[self.current_controlled] = full_obs
+
+        self._last_observations = observations
+        self._t = 0
+
+
         if self.current_controlled not in observations:
             raise RuntimeError(f"controlled agent {self.current_controlled} not in env observations")
 
@@ -879,8 +965,27 @@ class RLLibSingleAgentWrapper(gym.Env):
         obs_vec = self._flatten_to_vector(nested)
 
         info = infos.get(self.current_controlled, {})
+        if info is None:
+            info = {}
+
+        if not self.is_evaluation:
+            info["episode_seed"] = episode_seed
+            info["episode_counter"] = self._episode_counter
 
         obs_vec = self._ensure_obs_vector_ok(obs_vec, where="reset")
+
+        if not self._printed_obs_size_debug and not self.is_evaluation:
+            print("TRAIN obs_vec size:", len(obs_vec))
+            print("TRAIN expected_obs_size:", self.expected_obs_size)
+            self._printed_obs_size_debug = True
+
+        # Dump exactly once to inspect env->wrapper observation transformation.
+        self._dump_first_reset_observations_once(
+            raw_nested_obs=nested,
+            wrapper_obs_vec=obs_vec,
+            agent_id=self.current_controlled,
+            seed=seed,
+        )
 
         # Optional strict space check (debug)
         if self.strict_space_check and self._env_obs_space is not None:
@@ -901,7 +1006,15 @@ class RLLibSingleAgentWrapper(gym.Env):
         active_agents: List[str] = list(self._last_observations.keys())
         actions: Dict[str, Any] = {}
 
+        # Ensure we provide actions for ALL currently active agents in the environment,
+        # even if they are not in our last_observations (though they should be).
+        # We also need to be careful not to provide actions for agents that are NOT in the env.
+        env_agents = getattr(self.env, "agents", [])
+        
         for ag in active_agents:
+            if ag not in env_agents:
+                continue
+
             if ag == self.current_controlled:
                 nested_obs = self._last_observations[ag]
                 decoded = self._decode_action(action, agent_id=ag)
@@ -932,8 +1045,45 @@ class RLLibSingleAgentWrapper(gym.Env):
                     decoded = self._apply_action_mask(decoded, nested_obs, agent_id=ag)
                     actions[ag] = decoded
 
+        # SECOND PASS: Ensure consistency. If the environment expects actions for an agent 
+        # that we didn't cover (rare but possible if env state changed), we must add a default action
+        # to prevent KeyError in PeerGroupEnvironment.step().
+        for env_ag in env_agents:
+            if env_ag not in actions:
+                # We use a dummy observation if we don't have one
+                dummy_obs = self._last_observations.get(env_ag, {
+                    "observation": np.zeros(self.expected_obs_size, dtype=np.float32),
+                    "action_mask": {
+                        "choose_project": np.ones(self._CP, dtype=np.int8),
+                        "put_effort": np.ones(self._PE, dtype=np.int8),
+                        "collaborate_with": np.ones(self._CB, dtype=np.int8)
+                    }
+                })
+                actions[env_ag] = self._apply_action_mask(
+                    self._decode_action(self.action_space.sample(), agent_id=env_ag),
+                    dummy_obs,
+                    agent_id=env_ag
+                )
+
         # print(f"Wrapper.step(t={self._t}) with {len(actions)} actions")
-        observations, rewards, terminations, truncations, infos = self.env.step(actions)
+        try:
+            observations, rewards, terminations, truncations, infos = self.env.step(actions)
+
+            # If light observations are enabled, they are currently stored in observations[ag]
+            # But if we need the FULL observation for our controlled agent (for RLlib training),
+            # we must fetch it explicitly if it's currently a light one.
+            if getattr(self.env, "use_light_policy_obs", False):
+                if self.current_controlled in observations:
+                    # Re-build FULL observation for controlled agent
+                    full_obs = self.env._get_observation(self.current_controlled)
+                    observations[self.current_controlled]["observation"] = full_obs
+                    # Update the stored one too
+                    self.env.observations[self.current_controlled] = full_obs
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            raise e
+        
         self._last_observations = observations
 
         # Falls der kontrollierte Agent nicht mehr in den Beobachtungen auftaucht
@@ -978,7 +1128,12 @@ class RLLibSingleAgentWrapper(gym.Env):
             self._t = 0
             # Beobachtung für RLlib ist in diesem Fall egal; wir geben die letzte zurück
             # und signalisieren Done.
-            last_nested = next(iter(observations.values())) if observations else {}
+            last_nested = {}
+            if observations:
+                last_nested = next(iter(observations.values()))
+            else:
+                pass
+
             last_obs_vec = self._flatten_to_vector(last_nested) if isinstance(last_nested, dict) else np.zeros_like(
                 self.observation_space.low,
                 dtype=np.float32,
@@ -1067,6 +1222,12 @@ class RLLibSingleAgentWrapper(gym.Env):
 
     def _ensure_obs_vector_ok(self, obs_vec: Any, *, where: str) -> np.ndarray:
         """Ensure observation is a 1D float32 vector matching observation_space length."""
+        # START DEBUG TEMP: observation validation
+        if not np.all(np.isfinite(obs_vec)):
+            print(f"[DEBUG TEMP] PID {os.getpid()} NaN/Inf detected in observation at {where}! phase={getattr(self, '_debug_phase', 'unknown')}")
+            obs_vec = np.nan_to_num(obs_vec, nan=0.0, posinf=1.0, neginf=-1.0)
+        # END DEBUG TEMP
+        
         if not isinstance(obs_vec, np.ndarray):
             logger.warning("%s returned non-ndarray obs: %s", where, type(obs_vec))
             obs_vec = np.asarray(obs_vec, dtype=np.float32)
@@ -1124,3 +1285,51 @@ class RLLibSingleAgentWrapper(gym.Env):
             raise TypeError(f"Non-numeric object encountered while copying: {type(x)}")
         return arr.copy()
 
+    def _shape_tree(self, x: Any) -> Any:
+        """Return a nested structure containing shapes/dtypes for arrays."""
+        if isinstance(x, dict):
+            return {k: self._shape_tree(v) for k, v in x.items()}
+        if isinstance(x, (list, tuple)):
+            return [self._shape_tree(v) for v in x]
+        try:
+            arr = np.asarray(x)
+            return {"shape": tuple(arr.shape), "dtype": str(arr.dtype)}
+        except Exception:
+            return {"type": str(type(x))}
+
+    def _dump_first_reset_observations_once(
+        self,
+        raw_nested_obs: Any,
+        wrapper_obs_vec: np.ndarray,
+        agent_id: str,
+        seed: Any,
+    ) -> None:
+        """Write raw env obs + wrapper obs once (first reset only)."""
+        if self._obs_dump_written:
+            return
+
+        try:
+            self._obs_dump_path.parent.mkdir(parents=True, exist_ok=True)
+            content: List[str] = []
+            content.append("=== FIRST RESET OBSERVATION DUMP ===")
+            content.append(f"timestamp: {time.strftime('%Y-%m-%d %H:%M:%S')}")
+            content.append(f"controlled_agent: {agent_id}")
+            content.append(f"seed: {seed}")
+
+            content.append("\n--- RAW ENV OBS (nested, selected controlled agent) ---\n")
+            content.append(pformat(raw_nested_obs, width=120, compact=False))
+
+            content.append("\n--- RAW ENV OBS SHAPES ---\n")
+            content.append(pformat(self._shape_tree(raw_nested_obs), width=120, compact=False))
+
+            content.append("\n--- WRAPPER OBS (flattened vector) ---\n")
+            content.append(pformat(wrapper_obs_vec.tolist(), width=120, compact=False))
+
+            content.append("\n--- WRAPPER OBS SHAPE ---\n")
+            content.append(pformat(self._shape_tree(wrapper_obs_vec), width=120, compact=False))
+
+            self._obs_dump_path.write_text("\n".join(content), encoding="utf-8")
+            self._obs_dump_written = True
+            logger.info("Wrote first-reset observation dump to %s", self._obs_dump_path)
+        except Exception as exc:
+            logger.warning("Failed to write first-reset observation dump: %s", exc)

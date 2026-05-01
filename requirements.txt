@@ -13,3 +13,4 @@ torch
 ray[rllib]
 pytest
 lightning
+scikit-learn

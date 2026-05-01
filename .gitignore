@@ -25,6 +25,7 @@ runs/
 models/
 artifacts/
 iteration_time/
+test_results/
 *.pt
 *.ckpt
 *.pkl

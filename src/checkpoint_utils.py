@@ -29,12 +29,13 @@ def build_checkpoint_path(
     iteration: int,
     max_rewardless_steps: int,
     eval_return: Optional[float] = None,
+    wandb_run_id: Optional[str] = None,
     tag: str = "",
 ) -> str:
     """Build an explicit checkpoint directory path with dynamic naming.
 
     Structure:
-        <base_dir>/<dd-mm-yyyy>/<policy>_<reward>_iter<N>_mrl<M>_<dd-mm-HH-MM>_eval<X>[_<tag>]/
+        <base_dir>/<dd-mm-yyyy>/<policy>_<reward>_iter<N>_mrl<M>[_<wandb_id>]_<dd-mm-HH-MM>_eval<X>[_<tag>]/
 
     A daily subfolder is created automatically if it does not exist yet.
 
@@ -81,9 +82,14 @@ def build_checkpoint_path(
         reward_safe,
         f"iter{iteration:04d}",
         f"mrl{max_rewardless_steps}",
+    ]
+    if wandb_run_id:
+        parts.append(wandb_run_id)
+    
+    parts.extend([
         timestamp,
         eval_str,
-    ]
+    ])
     if tag:
         parts.append(tag)
 

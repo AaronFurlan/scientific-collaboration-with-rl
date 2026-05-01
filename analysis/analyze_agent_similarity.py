@@ -19,6 +19,17 @@ from sklearn.metrics.pairwise import cosine_similarity
 
 def load_jsonl(path: Path) -> List[Dict[str, Any]]:
     """Loads a JSONL file into a list of dictionaries."""
+    if not path.exists():
+        # Try relative to parent of current directory if path is relative
+        # and we are running from a subdirectory like 'notebooks' or 'analysis'
+        cwd = Path.cwd()
+        alt_path = cwd.parent / path
+        if alt_path.exists():
+            path = alt_path
+    
+    if not path.exists():
+        raise FileNotFoundError(f"File not found: {path} (Current Working Directory: {Path.cwd()})")
+        
     data = []
     with open(path, 'r', encoding='utf-8') as f:
         for line in f:
@@ -257,9 +268,21 @@ def plot_similarity_over_time(results_df: pd.DataFrame, output_dir: Path, prefix
 
 def main(actions_path: str, observations_path: str, output_prefix: str = "similarity_analysis", rolling_window: int = 10):
     """Main execution flow."""
-    print(f"Loading data from {actions_path} and {observations_path}...")
-    actions_data = load_jsonl(Path(actions_path))
-    obs_data = load_jsonl(Path(observations_path))
+    actions_path_obj = Path(actions_path)
+    observations_path_obj = Path(observations_path)
+    
+    # Validation
+    if not actions_path_obj.exists() and not actions_path_obj.is_absolute():
+        if (Path.cwd() / actions_path_obj).exists():
+             actions_path_obj = Path.cwd() / actions_path_obj
+             
+    if not observations_path_obj.exists() and not observations_path_obj.is_absolute():
+        if (Path.cwd() / observations_path_obj).exists():
+             observations_path_obj = Path.cwd() / observations_path_obj
+
+    print(f"Loading data from {actions_path_obj} and {observations_path_obj}...")
+    actions_data = load_jsonl(actions_path_obj)
+    obs_data = load_jsonl(observations_path_obj)
     
     num_timesteps = min(len(actions_data), len(obs_data))
     all_agent_features = []
@@ -312,6 +335,11 @@ def main(actions_path: str, observations_path: str, output_prefix: str = "simila
         'mean_cosine': 'overall_mean_cosine'
     }, inplace=True)
     
+    # Ensure directory for output_prefix exists if it includes directories
+    output_path = Path(output_prefix)
+    if output_path.parent != Path('.'):
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+
     summary.to_csv(f"{output_prefix}_summary.csv", index=False)
     print("\nOverall Summary:")
     print(summary)

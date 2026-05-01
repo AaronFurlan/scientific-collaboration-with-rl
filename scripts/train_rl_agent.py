@@ -579,6 +579,7 @@ def make_env_creator(
     info_action: bool = False,
     info_interval: int = 50,
     debug_effort: bool = False,
+    use_light_policy_obs: bool = False,
 ) -> Callable[[Optional[Dict[str, Any]]], Any]:
     """
     Returns an RLlib-compatible env creator: f(env_config) -> gymnasium.Env
@@ -644,6 +645,7 @@ def make_env_creator(
             acceptance_threshold=env_config.get("acceptance_threshold", acceptance_threshold),
             reward_mode=env_config.get("reward_function", reward_function),
             render_mode=None,
+            use_light_policy_obs=use_light_policy_obs,
         )
 
         # 2) Create fixed-policy assignments (same logic as run_policy_simulation.py)
@@ -667,6 +669,16 @@ def make_env_creator(
 
         # 4) Wrap to single-agent env for PPO
         # Force horizon -> ensures RLlib gets completed episodes & metrics
+        
+        # RLlib automatically injects worker_index and vector_index into env_config.
+        # However, some Ray versions might not do this depending on the configuration.
+        # We attempt to retrieve them.
+        worker_idx = env_config.get("worker_index", 0)
+        vector_idx = env_config.get("vector_index", 0)
+
+        # DEBUG: Log what env_creator receives
+        # print(f"[ENV_CREATOR DEBUG] pid={os.getpid()} worker={worker_idx} vector={vector_idx} eval={env_config.get('evaluation')}")
+        
         wrapper = RLLibSingleAgentWrapper(
             env,
             controlled_agent=controlled_agent_id,
@@ -678,6 +690,12 @@ def make_env_creator(
             info_interval=env_config.get("info_interval", info_interval),
             debug_effort=env_config.get("debug_effort", debug_effort),
             is_evaluation=env_config.get("evaluation", False),
+            env_config={
+                **env_config,
+                "base_seed": seed,
+                "worker_index": worker_idx,
+                "vector_index": vector_idx,
+            },
         )
 
         return wrapper
@@ -724,6 +742,7 @@ def main(
     info_action: bool = False,
     info_intervall: int = 50,
     debug_effort: bool = False,
+    use_light_policy_obs: bool = False,
     train_batch_size: int = 18000,
     # Checkpoint options
     save_every_n_iters: int = 50,
@@ -824,6 +843,11 @@ def main(
         "total_env_steps": total_env_steps,
     }
 
+    # Validate seed range [1 - 100]
+    if not (1 <= seed <= 100):
+        print(f"[ERROR] Training base seed {seed} is out of range [1 - 100].")
+        sys.exit(1)
+
     # 1) Ray init (robust, begrenzte Ressourcen)
     ray.init(
         ignore_reinit_error=True,
@@ -833,7 +857,9 @@ def main(
         num_cpus=os.cpu_count() or 4,
         _system_config={
             # verlängert die Wartezeit für raylet-Startup/GCS
-            "raylet_start_wait_time_s": 60.0,
+            "raylet_start_wait_time_s": 120.0,
+            "gcs_server_request_timeout_seconds": 60.0,
+            "worker_register_timeout_seconds": 120.0,
         },
     )
 
@@ -969,6 +995,7 @@ def main(
         info_action=info_action,
         info_interval=info_intervall,
         debug_effort=debug_effort,
+        use_light_policy_obs=use_light_policy_obs,
     )
     tune.register_env(env_name, env_creator)
 
@@ -1085,6 +1112,9 @@ def main(
         max_num_env_runner_restarts=10,
         delay_between_env_runner_restarts_s=10,
         ignore_env_runner_failures=True,
+        # Allow more time for worker recovery on slow Windows machines
+        env_runner_restore_timeout_s=120.0,
+        env_runner_health_probe_timeout_s=120.0,
     )
 
     # ------------------------------------------------------------------
@@ -1381,6 +1411,7 @@ def main(
                         iteration=i,
                         max_rewardless_steps=max_rewardless_steps,
                         eval_return=eval_return_val,
+                        wandb_run_id=wandb_run.id if use_wandb else None,
                         tag="best",
                     )
                     os.makedirs(chkpt_dir, exist_ok=True)
@@ -1424,6 +1455,7 @@ def main(
                         iteration=i,
                         max_rewardless_steps=max_rewardless_steps,
                         eval_return=eval_return_val if has_valid_eval else None,
+                        wandb_run_id=wandb_run.id if use_wandb else None,
                         tag="periodic",
                     )
                     os.makedirs(chkpt_dir, exist_ok=True)
@@ -1641,15 +1673,15 @@ if __name__ == "__main__":
     parser.add_argument("--seed", type=int, default=42)
 
     # Env knobs (keep small for PPO + macro-action)
-    parser.add_argument("--n-agents", type=int, default=400)
-    parser.add_argument("--start-agents", type=int, default=100)
-    parser.add_argument("--max-steps", type=int, default=600)
-    parser.add_argument("--max-rewardless-steps", type=int, default=50)
-    parser.add_argument("--n-groups", type=int, default=10)
-    parser.add_argument("--max-peer-group-size", type=int, default=40)
-    parser.add_argument("--n-projects-per-step", type=int, default=1)
-    parser.add_argument("--max-projects-per-agent", type=int, default=8)
-    parser.add_argument("--max-agent-age", type=int, default=750)
+    parser.add_argument("--n-agents", type=int, default=400) # 400
+    parser.add_argument("--start-agents", type=int, default=100) # 100
+    parser.add_argument("--max-steps", type=int, default=600) # 600
+    parser.add_argument("--max-rewardless-steps", type=int, default=50) # 50
+    parser.add_argument("--n-groups", type=int, default=10) # 10
+    parser.add_argument("--max-peer-group-size", type=int, default=40) # 40
+    parser.add_argument("--n-projects-per-step", type=int, default=1) # 1
+    parser.add_argument("--max-projects-per-agent", type=int, default=8) # 8
+    parser.add_argument("--max-agent-age", type=int, default=750) # 750
 
     # Reward knobs
     parser.add_argument("--acceptance-threshold", type=float, default=0.44)
@@ -1710,8 +1742,14 @@ if __name__ == "__main__":
         action="store_true",
         help="Enable detailed logging for action components (raw, scaled, rounded) in the wrapper.",
     )
+    parser.add_argument(
+        "--use-light-policy-obs",
+        action="store_true",
+        default=False,
+        help="If set, uses lightweight observations for heuristic agents to speed up training.",
+    )
 
-    parser.add_argument("--train-batch-size", type=int, default=18000,
+    parser.add_argument("--train-batch-size", type=int, default=10000,
                         help="Number of env steps collected per training iteration.")
 
     parser.add_argument("--vf-share-layers", action="store_true", default=True,
@@ -1735,13 +1773,13 @@ if __name__ == "__main__":
                         help="Number of steps to collect per fragment.")
 
     # RL training hyperparameters
-    parser.add_argument("--gamma", type=float, default=0.973060999938588)
-    parser.add_argument("--lambda", dest="lambda_", type=float, default=0.9585499239587636)
-    parser.add_argument("--lr", type=float, default=0.00004299021945559274)
-    parser.add_argument("--num-epochs", type=int, default=6)
-    parser.add_argument("--entropy-coeff", type=float, default=0.0005)
-    parser.add_argument("--vf-loss-coeff", type=float, default=2.5)
-    parser.add_argument("--grad-clip", type=float, default=0.47456641063621474)
+    parser.add_argument("--gamma", type=float, default=0.9583432181048404)
+    parser.add_argument("--lambda", dest="lambda_", type=float, default=0.9626992994491804)
+    parser.add_argument("--lr", type=float, default=0.00020375077263171516)
+    parser.add_argument("--num-epochs", type=int, default=3)
+    parser.add_argument("--entropy-coeff", type=float, default=0.005515494202562797)
+    parser.add_argument("--vf-loss-coeff", type=float, default=1.941963717117803)
+    parser.add_argument("--grad-clip", type=float, default=0.5223688871667344)
 
     args = parser.parse_args()
 
@@ -1777,6 +1815,7 @@ if __name__ == "__main__":
         info_action=args.info_action,
         info_intervall=args.info_intervall,
         debug_effort=args.debug_effort,
+        use_light_policy_obs=args.use_light_policy_obs,
         train_batch_size=args.train_batch_size,
         save_every_n_iters=args.save_every_n_iters,
         evaluation_interval=args.evaluation_interval,
