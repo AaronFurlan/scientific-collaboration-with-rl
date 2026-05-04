@@ -31,10 +31,13 @@ def _emergency_continue_any(running_projects: Dict[str, Any]) -> bool:
     """
     for proj in running_projects.values():
         contributors = len(proj.get("contributors", []))
+        if contributors < 1:
+            continue
         time_left = proj.get("time_left")[0]
         required = proj.get("required_effort")[0]
         current = proj.get("current_effort")[0]
-        if (time_left / contributors) < (required - current):
+        # max future effort is smaller than remaining required effort
+        if (time_left * contributors) < (required - current):
             return True
     return False
 
