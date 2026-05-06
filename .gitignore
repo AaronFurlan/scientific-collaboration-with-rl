@@ -26,6 +26,7 @@ models/
 artifacts/
 iteration_time/
 test_results/
+notebooks/analysis_results
 *.pt
 *.ckpt
 *.pkl
