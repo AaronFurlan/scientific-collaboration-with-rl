@@ -18,6 +18,20 @@ python .\scripts\test_rl_agent.py --num-seeds 1 --seed 42 --debug-all --output-p
 ```bash
  python .\scripts\train_rl_agent.py --iterations 5 --wandb-mode disabled --train-batch-size 1000 --max-peer-group-size 10 --n-groups 10 --n-agents 100
 ```
+## Debugging `train_dreamerv3.py`
+```bash
+python scripts\train_dreamerv3.py --total-env-steps 5000 --num-gpus 1 --training-ratio 64 --wandb-mode online --wandb-group "DreamerV3_Test"
+```
+
+### With Invalid Action Penalty (Recommended)
+```bash
+python scripts\train_dreamerv3.py --total-env-steps 5000 --wandb-mode online --wandb-group "DreamerV3_Test" --invalid-action-penalty 0.1
+```
+
+### With Action Mask Debugging
+```bash
+python scripts\train_dreamerv3.py --total-env-steps 500 --wandb-mode online --wandb-group "DreamerV3_Test" --use-light-policy-obs --debug-action-mask --debug-action-mask-steps 100 --debug-action-mask-interval 250 --debug-action-mask-jsonl debug_action_mask.jsonl --invalid-action-penalty 0.1
+```
 
 ## Training `train_rl_agent.py`
 ````bash

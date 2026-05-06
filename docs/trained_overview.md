@@ -39,7 +39,7 @@
 `python .\scripts\train_rl_agent.py --iterations 100 --seed 2 --wandb-group "Default_Setup1"`
 - Seed 1: 100 iterations, run ID: hqi8lme0 (`checkpoints/23-04-2026/balanced_by_effort_iter0099_mrl50_23-04-11-18_eval_na_periodic`)
 - Seed 2: 100 iterations, run ID: nvnrxjxo (`checkpoints/25-04-2026/balanced_by_effort_iter0099_mrl50_25-04-03-13_eval_na_periodic`)
-- Seed 3: 100 iterations, run ID: eiy14h2k (`checkpoints/26-04-2026/balanced_by_effort_iter0069_mrl50_eiy14h2k_26-04-06-23_eval12.35_periodic`)
+- Seed 3: 100 iterations, run ID: eiy14h2k (`checkpoints/26-04-2026/balanced_by_effort_iter0069_mrl50_eiy14h2k_26-04-06-23_eval12.35_periodic`) # Crashed, continued training
 - Seed 4: 100 iterations, run ID: aw841bxi (`checkpoints/26-04-2026/balanced_by_effort_iter0099_mrl50_aw841bxi_26-04-20-42_eval_na_periodic`)
 - Seed 5: 100 iterations, run ID: dbdosvul (`checkpoints/27-04-2026/balanced_by_effort_iter0099_mrl50_dbdosvul_27-04-13-27_eval_na_periodic`)
 
@@ -89,8 +89,8 @@
 - Seed 1: 100 iterations, run ID: a2s9m0hg (`checkpoints/28-04-2026/balanced_by_effort_iter0099_mrl50_a2s9m0hg_28-04-11-16_eval_na_periodic`)
 - Seed 2: 100 iterations, run ID: 7kamraoi (`checkpoints/29-04-2026/balanced_by_effort_iter0099_mrl50_7kamraoi_29-04-08-06_eval_na_periodic`)
 - Seed 3: 100 iterations, run ID: vurdac00 (`checkpoints/30-04-2026/balanced_by_effort_iter0099_mrl50_vurdac00_30-04-11-40_eval_na_periodic`)
-- Seed 4: 100 iterations, run ID: pcudux1u (``)
-- Seed 5: 100 iterations, run ID:  (``)
+- Seed 4: 100 iterations, run ID: pcudux1u (`checkpoints/01-05-2026/balanced_by_effort_iter0079_mrl50_pcudux1u_01-05-01-23_eval_na_periodic`) # Crashed, continued training
+- Seed 5: 100 iterations, run ID: 44fwk28s (`checkpoints/02-05-2026/balanced_by_effort_iter0099_mrl50_44fwk28s_02-05-06-29_eval_na_periodic`)
 
 - seed 1: best: ``
 - seed 2: best: ``
