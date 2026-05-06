@@ -747,7 +747,7 @@ def main(
     # Checkpoint options
     save_every_n_iters: int = 50,
     # Profiling overrides
-    num_workers: int = 6,
+    num_workers: int = 6,  # Reduced for APPO stability on CPU-only systems
     evaluation_interval: Optional[int] = None,
     # RL training hyperparameters
     gamma: float = 0.99,
@@ -938,7 +938,7 @@ def main(
 
                 project = wandb_project or "game-of-science-ppo"
                 run_name = (
-                    f"ppo_{policy_config_name}_{reward_function}_s{seed}_n{n_agents}"
+                    f"{algo}_{policy_config_name}_{reward_function}_s{seed}_n{n_agents}"
                 )
 
                 init_kwargs: Dict[str, Any] = {
@@ -948,7 +948,7 @@ def main(
                     "mode": wandb_mode,
                     "id": wandb_run_id,
                     "resume": "allow" if wandb_run_id else None,
-                    "settings": wandb.Settings(silent=True, console="off", _disable_stats=True)
+                    "settings": wandb.Settings(silent=True, console="off", _disable_stats=False)
                 }
                 if wandb_entity:
                     init_kwargs["entity"] = wandb_entity
@@ -1077,6 +1077,11 @@ def main(
                 },
             )
             .framework(framework)
+            .resources(
+                # Explicitly disable GPU for APPO
+                num_gpus=0,
+                num_gpus_per_learner_worker=0,
+            )
             .training(
                 train_batch_size=train_batch_size,
                 gamma=gamma,
@@ -1084,6 +1089,12 @@ def main(
                 grad_clip=grad_clip,
                 entropy_coeff=entropy_coeff,
                 vf_loss_coeff=vf_loss_coeff,
+                # APPO-specific: minibatch_buffer_size must be 1 for CPU-only (no multi-GPU)
+                minibatch_buffer_size=1,
+                # APPO-specific: Reduce broadcast frequency to reduce overhead
+                broadcast_interval=2,
+                # APPO-specific: Increase queue timeout to prevent premature _queue.Empty
+                learner_queue_timeout=300,
                 model={
                     "fcnet_hiddens": [256, 256],
                     "fcnet_activation": "tanh",
@@ -1147,9 +1158,13 @@ def main(
             # Create extra evaluation EnvRunners in the evaluation group.
             evaluation_num_env_runners=2,
 
+            # CRITICAL: Disable parallel evaluation to prevent deadlocks in APPO
+            evaluation_parallel_to_training=False,
+
             # Run evaluation for a fixed number of episodes (total across all eval runners).
+            # REDUCED from 20 to 4 episodes to prevent long evaluation blocking APPO's learner thread
             evaluation_duration_unit="episodes",
-            evaluation_duration=20, # Increased for robustness
+            evaluation_duration=4,  # 4 episodes = ~2400 steps max (2 runners × 2 episodes each)
             evaluation_config={
                 "explore": False,
                 "env_config": {
@@ -1406,6 +1421,7 @@ def main(
                 best_eval_iter = i
                 try:
                     chkpt_dir = build_checkpoint_path(
+                        algo=algo,
                         policy_config_name=policy_config_name,
                         reward_function=reward_function,
                         iteration=i,
@@ -1450,6 +1466,7 @@ def main(
             if save_every_n_iters > 0 and (i + 1) % save_every_n_iters == 0:
                 try:
                     chkpt_dir = build_checkpoint_path(
+                        algo=algo,
                         policy_config_name=policy_config_name,
                         reward_function=reward_function,
                         iteration=i,
@@ -1687,7 +1704,7 @@ if __name__ == "__main__":
     parser.add_argument("--acceptance-threshold", type=float, default=0.44)
     parser.add_argument("--reward-function", type=str, default="by_effort", choices=["multiply", "evenly", "by_effort"])
 
-    # Heuristic thresholds (same as your simulation script)
+    # Heuristic thresholds
     parser.add_argument("--prestige-threshold", type=float, default=0.29)
     parser.add_argument("--novelty-threshold", type=float, default=0.4)
     parser.add_argument("--effort-threshold", type=int, default=35)
@@ -1749,7 +1766,7 @@ if __name__ == "__main__":
         help="If set, uses lightweight observations for heuristic agents to speed up training.",
     )
 
-    parser.add_argument("--train-batch-size", type=int, default=10000,
+    parser.add_argument("--train-batch-size", type=int, default=2000,
                         help="Number of env steps collected per training iteration.")
 
     parser.add_argument("--vf-share-layers", action="store_true", default=True,
@@ -1765,7 +1782,7 @@ if __name__ == "__main__":
                         help="Path to a checkpoint to restore from.")
 
     # Parallelization settings
-    parser.add_argument("--num-workers", type=int, default=5,
+    parser.add_argument("--num-workers", type=int, default=3,
                         help="Number of RLlib rollout workers.")
     parser.add_argument("--num-envs-per-worker", type=int, default=1,
                         help="Number of environments per worker.")
@@ -1773,13 +1790,13 @@ if __name__ == "__main__":
                         help="Number of steps to collect per fragment.")
 
     # RL training hyperparameters
-    parser.add_argument("--gamma", type=float, default=0.9583432181048404)
-    parser.add_argument("--lambda", dest="lambda_", type=float, default=0.9626992994491804)
-    parser.add_argument("--lr", type=float, default=0.00020375077263171516)
+    parser.add_argument("--gamma", type=float, default=0.997)
+    parser.add_argument("--lambda", dest="lambda_", type=float, default=0.98)
+    parser.add_argument("--lr", type=float, default=0.0001)
     parser.add_argument("--num-epochs", type=int, default=3)
-    parser.add_argument("--entropy-coeff", type=float, default=0.005515494202562797)
-    parser.add_argument("--vf-loss-coeff", type=float, default=1.941963717117803)
-    parser.add_argument("--grad-clip", type=float, default=0.5223688871667344)
+    parser.add_argument("--entropy-coeff", type=float, default=0.01)
+    parser.add_argument("--vf-loss-coeff", type=float, default=0.5)
+    parser.add_argument("--grad-clip", type=float, default=1.0)
 
     args = parser.parse_args()
 

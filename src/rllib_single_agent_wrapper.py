@@ -1169,6 +1169,32 @@ class RLLibSingleAgentWrapper(gym.Env):
                 info["papers_completed"] = completed
                 info["papers_accepted"] = accepted
                 info["papers_rejected"] = rejected
+
+                # Add paper_stats for callbacks (same format as Dreamer wrapper)
+                n_active_projects = sum(
+                    1 for project in self.env.projects.values()
+                    if project is not None and not project.finished
+                )
+                n_published_projects = sum(
+                    1 for project in self.env.projects.values()
+                    if project is not None and project.finished and project.final_reward > 0
+                )
+                n_rejected_projects = sum(
+                    1 for project in self.env.projects.values()
+                    if project is not None and project.finished and project.final_reward <= 0
+                )
+                n_due_projects = sum(
+                    1 for project in self.env.projects.values()
+                    if project is not None and not project.finished and
+                       project.get_time_remaining(self.env.timestep) <= 10
+                )
+
+                info["paper_stats"] = {
+                    "n_active_projects": n_active_projects,
+                    "n_due_projects": n_due_projects,
+                    "n_published_projects": n_published_projects,
+                    "n_rejected_projects": n_rejected_projects,
+                }
         except Exception:
             pass  # never crash training for stats
         if self.strict_space_check and self._env_obs_space is not None:

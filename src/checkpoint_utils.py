@@ -24,6 +24,7 @@ from typing import Optional
 def build_checkpoint_path(
     *,
     base_dir: str = "checkpoints",
+    algo: str = "ppo",
     policy_config_name: str,
     reward_function: str,
     iteration: int,
@@ -35,7 +36,7 @@ def build_checkpoint_path(
     """Build an explicit checkpoint directory path with dynamic naming.
 
     Structure:
-        <base_dir>/<dd-mm-yyyy>/<policy>_<reward>_iter<N>_mrl<M>[_<wandb_id>]_<dd-mm-HH-MM>_eval<X>[_<tag>]/
+        <base_dir>/<dd-mm-yyyy>/<algo>_<policy>_<reward>_iter<N>_mrl<M>[_<wandb_id>]_<dd-mm-HH-MM>_eval<X>[_<tag>]/
 
     A daily subfolder is created automatically if it does not exist yet.
 
@@ -43,6 +44,8 @@ def build_checkpoint_path(
     ----------
     base_dir : str
         Root directory for all checkpoints (default: ``"checkpoints"``).
+    algo : str
+        Name of the algorithm (e.g. ``"ppo"``, ``"appo"``).
     policy_config_name : str
         Name of the policy distribution (e.g. ``"Balanced"``).
     reward_function : str
@@ -68,6 +71,7 @@ def build_checkpoint_path(
     timestamp = now.strftime("%d-%m-%H-%M")     # e.g. "10-03-14-30"
 
     # Sanitize names for filesystem (spaces → underscores, lowercase)
+    algo_safe = algo.replace(" ", "_").lower()
     policy_safe = policy_config_name.replace(" ", "_").lower()
     reward_safe = reward_function.replace(" ", "_").lower()
 
@@ -78,6 +82,7 @@ def build_checkpoint_path(
         eval_str = "eval_na"
 
     parts = [
+        algo_safe,
         policy_safe,
         reward_safe,
         f"iter{iteration:04d}",

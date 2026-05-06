@@ -67,7 +67,6 @@ class PapersMetricsCallback(DefaultCallbacks):
             "_ps_rejected": [],
             # Effort diagnostics accumulators
             "_eff_applied": [],
-            "_eff_invalid": [],
             "_choose_effective": [],
             "_n_active_agent": [],
             # New effort/decision quality metrics
@@ -120,14 +119,25 @@ class PapersMetricsCallback(DefaultCallbacks):
             ud["_ps_published"].append(ps.get("n_published_projects", 0))
             ud["_ps_rejected"].append(ps.get("n_rejected_projects", 0))
 
+            # # DEBUG: Print first few times
+            # if not hasattr(self, '_debug_ps_count'):
+            #     self._debug_ps_count = 0
+            # if self._debug_ps_count < 3:
+            #     print(f"[DEBUG callback on_episode_step] Received paper_stats: {ps}")
+            #     self._debug_ps_count += 1
+        else:
+            # DEBUG: Print if paper_stats is missing
+            if not hasattr(self, '_debug_ps_missing_count'):
+                self._debug_ps_missing_count = 0
+            if self._debug_ps_missing_count < 3:
+                print(f"[DEBUG callback on_episode_step] No paper_stats in info. Keys: {list(info.keys())}")
+                self._debug_ps_missing_count += 1
+
         # Effort diagnostics
         de = info.get("debug_effort")
         if isinstance(de, dict):
             ud["_eff_applied"].append(
                 float(de.get("effort_applied_this_step", 0.0))
-            )
-            ud["_eff_invalid"].append(
-                int(de.get("effort_action_invalid", 0))
             )
             ud["_choose_effective"].append(
                 int(de.get("choose_project_effective", 0))
@@ -193,12 +203,10 @@ class PapersMetricsCallback(DefaultCallbacks):
 
         # Effort diagnostics
         eff_applied = ud.get("_eff_applied", [])
-        eff_invalid = ud.get("_eff_invalid", [])
         choose_eff = ud.get("_choose_effective", [])
         n_active_agent = ud.get("_n_active_agent", [])
 
         effort_applied_sum = float(np.sum(eff_applied)) if eff_applied else 0.0
-        effort_invalid_frac = float(np.mean(eff_invalid)) if eff_invalid else 0.0
         choose_effective_frac = float(np.mean(choose_eff)) if choose_eff else 0.0
         active_projects_agent_mean = float(np.mean(n_active_agent)) if n_active_agent else 0.0
 
@@ -208,7 +216,6 @@ class PapersMetricsCallback(DefaultCallbacks):
             "papers_published_count": papers_published_last,
             "papers_rejected_count": papers_rejected_last,
             "agent0_effort_applied_sum": effort_applied_sum,
-            "agent0_effort_invalid_frac": effort_invalid_frac,
             "agent0_choose_effective_frac": choose_effective_frac,
             "agent0_active_projects_mean": active_projects_agent_mean,
             # Slot selection quality (absolute counts)
@@ -242,17 +249,33 @@ class PapersMetricsCallback(DefaultCallbacks):
             for k, v in em.items():
                 metrics[f"horizon_{k}"] = float(v)
 
+        # Capture all new structured info dicts
+        last_info = self._get_last_info(episode)
+        if isinstance(last_info, dict):
+            for key in ["reward_components", "episode_reward_components", 
+                        "action_validity", "action_validity_episode", 
+                        "action_distribution", "action_distribution_episode", 
+                        "rl_agent_projects", "global_projects", "observation_stats",
+                        "rl_agent_stats"]:
+                val = last_info.get(key)
+                if isinstance(val, dict):
+                    for k, v in val.items():
+                        metrics_key = f"{key}/{k}"
+                        if isinstance(v, (int, float, np.number)):
+                            metrics[metrics_key] = float(v)
+
         # Write to custom_metrics (old stack) and metrics_logger (new stack)
         self._write_metrics(episode, metrics_logger, metrics)
 
         if _DEBUG:
+            effort_invalid_rate = metrics.get("effort/invalid_rate", 0.0)
             print(
                 f"[PAPERS] ep_end: total={papers_total_last} "
                 f"active_mean={papers_active_mean:.1f} "
                 f"published={papers_published_last} "
                 f"rejected={papers_rejected_last} "
                 f"effort_sum={effort_applied_sum:.2f} "
-                f"invalid_frac={effort_invalid_frac:.3f} "
+                f"invalid_frac={effort_invalid_rate:.3f} "
                 f"choose_eff={choose_effective_frac:.3f} "
                 f"active_agent_mean={active_projects_agent_mean:.1f}"
             )
