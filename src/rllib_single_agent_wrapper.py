@@ -31,6 +31,7 @@ import time
 import os
 from pathlib import Path
 from pprint import pformat
+from pprint import pprint
 
 import numpy as np
 import gymnasium as gym
@@ -132,6 +133,11 @@ class RLLibSingleAgentWrapper(gym.Env):
 
         self.current_controlled: Optional[str] = None
         self._last_observations: Dict[str, Any] = {}
+
+        # Project ID to slot mapping for stable observation encoding
+        # Maps environment project_id (string) -> slot index (0 to max_projects_per_agent-1)
+        self._project_slot_mapping: Dict[str, int] = {}
+        self._slot_to_project: List[Optional[str]] = [None] * self.env.max_projects_per_agent
 
         # One-time debug dump for first reset observations.
         self._obs_dump_written: bool = False
@@ -787,6 +793,9 @@ class RLLibSingleAgentWrapper(gym.Env):
         # Only normalize if NOT a template
         if not is_template:
             obs_part = self._normalize_observation(obs_part)
+            # Also transform the action mask to match our slot mapping
+            raw_running = nested_obs.get("observation", {}).get("running_projects", {})
+            mask_part = self._transform_action_mask(mask_part, raw_running)
 
         obs_vec = self._flatten_any_like_template(obs_part, self._obs_template)
         mask_vec = self._flatten_mask_like_template(mask_part, self._mask_template)
@@ -802,6 +811,108 @@ class RLLibSingleAgentWrapper(gym.Env):
 
         return out
 
+    def _update_project_slot_mapping(self, raw_running: Dict[str, Any]) -> None:
+        """
+        Update the project ID -> slot mapping based on current running projects.
+
+        - New projects get assigned to the first available slot
+        - Projects no longer in raw_running are removed from their slots
+        - Maintains stable slot assignments across steps
+        """
+        # Get current project IDs from environment
+        current_project_ids = set(raw_running.keys())
+
+        # Remove projects that are no longer active
+        for project_id in list(self._project_slot_mapping.keys()):
+            if project_id not in current_project_ids:
+                slot_idx = self._project_slot_mapping[project_id]
+                self._slot_to_project[slot_idx] = None
+                del self._project_slot_mapping[project_id]
+
+        # Add new projects to first available slots
+        for project_id in current_project_ids:
+            if project_id not in self._project_slot_mapping:
+                # Find first free slot
+                for slot_idx in range(self.env.max_projects_per_agent):
+                    if self._slot_to_project[slot_idx] is None:
+                        self._project_slot_mapping[project_id] = slot_idx
+                        self._slot_to_project[slot_idx] = project_id
+                        break
+
+    def _transform_action_mask(self, mask: Dict[str, Any], raw_running: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Transform action_mask from environment (based on filtered project list)
+        to wrapper slots (based on stable slot mapping).
+
+        The environment's put_effort mask is based on the count of active projects,
+        but the wrapper needs a mask based on its stable slot assignments.
+        """
+        if not isinstance(mask, dict):
+            return mask
+
+        transformed_mask = mask.copy()
+
+        # Transform put_effort mask based on our slot mapping
+        env_pe_mask = np.asarray(mask.get("put_effort", []))
+        if env_pe_mask.size > 0:
+            # Create new mask based on wrapper slots
+            wrapper_pe_mask = np.zeros(self.env.max_projects_per_agent + 1, dtype=np.int8)
+            wrapper_pe_mask[0] = 1  # "do nothing" is always valid
+
+            # Mark slots as valid if they contain an active project
+            for slot_idx in range(self.env.max_projects_per_agent):
+                if self._slot_to_project[slot_idx] is not None:
+                    wrapper_pe_mask[slot_idx + 1] = 1
+
+            transformed_mask["put_effort"] = wrapper_pe_mask
+
+        return transformed_mask
+
+    def _transform_put_effort_action(self, action: ActionDict, nested_obs: NestedObs) -> ActionDict:
+        """
+        Transform put_effort action from wrapper slot index to environment filtered list index.
+
+        The wrapper uses stable slots (0, 1, 2, ..., max_projects_per_agent-1).
+        The environment expects indices into the filtered list of active projects.
+
+        Example:
+        - Wrapper slots: [proj_A, None, proj_C, None]  (slots 0 and 2 occupied)
+        - Env filtered list: [proj_A, proj_C]  (indices 0 and 1)
+        - Wrapper action put_effort=3 (slot 2) → Env action put_effort=2 (index 1 in filtered list)
+        """
+        if not isinstance(action, dict):
+            return action
+
+        put_effort = action.get("put_effort", 0)
+        if put_effort == 0:
+            return action  # No effort, no transformation needed
+
+        # Convert from 1-based action to 0-based slot index
+        wrapper_slot_idx = put_effort - 1
+
+        # Get the project ID at this wrapper slot
+        if wrapper_slot_idx < 0 or wrapper_slot_idx >= len(self._slot_to_project):
+            return action  # Invalid slot, let environment handle it
+
+        project_id = self._slot_to_project[wrapper_slot_idx]
+        if project_id is None:
+            return action  # Empty slot, let environment handle it
+
+        # Find the position of this project_id in the environment's filtered list
+        # The filtered list is constructed in the same order as _get_active_projects returns
+        raw_running = nested_obs.get("observation", {}).get("running_projects", {})
+        project_ids_in_order = list(raw_running.keys())
+
+        try:
+            env_filtered_idx = project_ids_in_order.index(project_id)
+            # Convert back to 1-based action
+            action["put_effort"] = env_filtered_idx + 1
+        except ValueError:
+            # Project ID not found in current observation (race condition?), do nothing
+            action["put_effort"] = 0
+
+        return action
+
     def _normalize_observation(self, obs_part: Dict[str, Any]) -> Dict[str, Any]:
         """
         Normalize observation to ensure consistent size across episodes.
@@ -812,6 +923,9 @@ class RLLibSingleAgentWrapper(gym.Env):
         - progress / remaining effort / urgency
         - summarized collaborator information
         - explicit slot identity features
+
+        The wrapper maintains a stable mapping from environment project IDs to fixed slots,
+        ensuring that projects remain in the same slot across timesteps until they complete.
         """
         obs_copy = obs_part.copy() if isinstance(obs_part, dict) else {}
 
@@ -819,12 +933,20 @@ class RLLibSingleAgentWrapper(gym.Env):
         if not isinstance(raw_running, dict):
             raw_running = {}
 
+        # Update slot mapping based on current projects
+        self._update_project_slot_mapping(raw_running)
+
+        # Build normalized observation with stable slot assignments
         normalized_running = {}
-        for i in range(self.env.max_projects_per_agent):
-            project_key = f"project_{i}"
-            raw_project = raw_running.get(project_key)
+        for slot_idx in range(self.env.max_projects_per_agent):
+            project_key = f"project_{slot_idx}"
+
+            # Get the project ID assigned to this slot (if any)
+            project_id = self._slot_to_project[slot_idx]
+            raw_project = raw_running.get(project_id) if project_id else None
+
             is_active = bool(isinstance(raw_project, dict) and len(raw_project) > 0)
-            normalized_running[project_key] = self._encode_project_slot(raw_project, i, is_active=is_active)
+            normalized_running[project_key] = self._encode_project_slot(raw_project, slot_idx, is_active=is_active)
 
         obs_copy["running_projects"] = normalized_running
         return obs_copy
@@ -956,6 +1078,9 @@ class RLLibSingleAgentWrapper(gym.Env):
         self._last_observations = observations
         self._t = 0
 
+        # Reset project slot mapping for new episode
+        self._project_slot_mapping.clear()
+        self._slot_to_project = [None] * self.env.max_projects_per_agent
 
         if self.current_controlled not in observations:
             raise RuntimeError(f"controlled agent {self.current_controlled} not in env observations")
@@ -1019,6 +1144,8 @@ class RLLibSingleAgentWrapper(gym.Env):
                 nested_obs = self._last_observations[ag]
                 decoded = self._decode_action(action, agent_id=ag)
                 decoded = self._apply_action_mask(decoded, nested_obs, agent_id=ag)
+                # Transform put_effort from wrapper slot to environment filtered list index
+                decoded = self._transform_put_effort_action(decoded, nested_obs)
                 actions[ag] = decoded
             else:
                 policy = self.other_policies.get(ag)
