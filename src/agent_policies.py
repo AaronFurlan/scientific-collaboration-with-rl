@@ -78,7 +78,7 @@ def _select_effort_best_fit_or_threshold(
             and proj["current_effort"][0] <= required
             and _mask_allowed(put_effort_mask, slot_idx + 1)
         ):
-            return slot_idx
+            return slot_idx + 1 # Fix?
         if _mask_allowed(put_effort_mask, slot_idx + 1):
             fit = float(np.sum(proj["peer_fit"])) if len(proj["peer_fit"]) > 0 else 0.0
             candidates.append((slot_idx + 1, fit))

@@ -640,7 +640,9 @@ class PeerGroupEnvironment(ParallelEnv):
             ):
 
                 selected_project = action["put_effort"] - 1
-                effort_project_id = self.agent_active_projects[idx][selected_project]
+                # Maybe bug? Index inconsistency?
+                active_projects = self._get_active_projects(idx)
+                effort_project_id = active_projects[selected_project]
                 if effort_project_id is not None:
                     effort_project = self.projects[effort_project_id]
                     contributors_idx = (
@@ -656,7 +658,8 @@ class PeerGroupEnvironment(ParallelEnv):
                     self.projects[effort_project_id].add_effort(effort_amount)
                     self.agent_project_effort[idx][effort_project_id] += effort_amount
                 else:
-                    print(f"Couldn't find project: {selected_project}")
+                    agent_name = f"agent_{idx}"
+                    print(f"Couldn't find project: {selected_project} | Agent: {agent_name}")
         
         # Collaboration intents (for each agent, with their peers)
         for pg_idx, peer_group in enumerate(self.peer_groups):
