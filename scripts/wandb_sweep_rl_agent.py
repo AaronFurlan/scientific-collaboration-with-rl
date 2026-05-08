@@ -101,45 +101,50 @@ def create_sweep_config(project_name="game-of-science-sweeps", algo="PPO"):
         project_name: WandB Projektname
         algo: Algorithmus - "PPO" oder "APPO"
     """
-    sweep_configuration = {
-        "method": "bayes",  # Bayesianische Optimierung statt Grid Search
-        "name": f"RL {algo} Bayesian Hyperparameter Search",
-        "metric": {
-            "name": "train/episode_return_mean",
-            "goal": "maximize"
+    # Gemeinsame Parameter für beide Algorithmen
+    common_parameters = {
+        "algo": {
+            "value": algo  # Fest für diesen Sweep
         },
-        "parameters": {
-            "algo": {
-                "value": algo  # Fest für diesen Sweep
-            },
-            "lr": {
-                "distribution": "log_uniform_values",
-                "min": 1e-5,
-                "max": 5e-4
-            },
-            "entropy_coeff": {
-                "distribution": "log_uniform_values",
-                "min": 0.005,
-                "max": 0.008
-            },
-            "vf_loss_coeff": {
-                "distribution": "uniform",
-                "min": 1.9,
-                "max": 2.0
-            },
-            "grad_clip": {
-                "distribution": "uniform",
-                "min": 0.50,
-                "max": 0.54
-            },
-            "vf_share_layers": {
-                "values": [True]
-            },
-            "gamma": {
-                "distribution": "uniform",
-                "min": 0.958,
-                "max": 0.96
-            },
+        "lr": {
+            "distribution": "log_uniform_values",
+            "min": 1e-5,
+            "max": 5e-4
+        },
+        "entropy_coeff": {
+            "distribution": "log_uniform_values",
+            "min": 0.005,
+            "max": 0.008
+        },
+        "vf_loss_coeff": {
+            "distribution": "uniform",
+            "min": 1.9,
+            "max": 2.0
+        },
+        "grad_clip": {
+            "distribution": "uniform",
+            "min": 0.50,
+            "max": 0.54
+        },
+        "vf_share_layers": {
+            "values": [True]
+        },
+        "gamma": {
+            "distribution": "uniform",
+            "min": 0.958,
+            "max": 0.96
+        },
+        "train_batch_size": {
+            "values": [8000, 10000, 12000]
+        },
+        "total_env_steps": {
+            "value": 300000
+        }
+    }
+
+    # Algorithmus-spezifische Parameter
+    if algo == "PPO":
+        algo_specific_parameters = {
             "lambda_": {
                 "distribution": "uniform",
                 "min": 0.959,
@@ -147,14 +152,52 @@ def create_sweep_config(project_name="game-of-science-sweeps", algo="PPO"):
             },
             "num_epochs": {
                 "values": [3, 4]
-            },
-            "train_batch_size": {
-                "values": [8000, 10000, 12000]
-            },
-            "total_env_steps": {
-                "value": 300000
             }
+        }
+    elif algo == "APPO":
+        algo_specific_parameters = {
+            "vtrace": {
+                "value": True  # APPO verwendet V-trace statt GAE
+            },
+            "vtrace_clip_rho_threshold": {
+                "distribution": "uniform",
+                "min": 1.0,
+                "max": 2.0  # Standard: 1.0, konservative Range
+            },
+            "vtrace_clip_pg_rho_threshold": {
+                "distribution": "uniform",
+                "min": 1.0,
+                "max": 2.0  # Standard: 1.0, meist <= rho_threshold
+            },
+            "target_network_update_freq": {
+                "values": [1, 2, 4, 8]  # Standard: 1, wie oft Target-Network aktualisiert wird
+            },
+            "num_sgd_iter": {
+                "values": [1, 2]  # Standard: 1, Anzahl SGD Iterationen pro Batch
+            },
+            "minibatch_buffer_size": {
+                "values": [1, 2]  # Standard: 1, Replay Buffer Größe in Minibatches
+            },
+            "replay_proportion": {
+                "distribution": "uniform",
+                "min": 0.0,
+                "max": 0.5  # Standard: 0.0, Anteil Replay vs. neue Daten
+            }
+        }
+    else:
+        raise ValueError(f"Unsupported algorithm: {algo}")
+
+    # Kombiniere gemeinsame und spezifische Parameter
+    parameters = {**common_parameters, **algo_specific_parameters}
+
+    sweep_configuration = {
+        "method": "bayes",  # Bayesianische Optimierung statt Grid Search
+        "name": f"RL {algo} Bayesian Hyperparameter Search",
+        "metric": {
+            "name": "train/episode_return_mean",
+            "goal": "maximize"
         },
+        "parameters": parameters,
         "early_terminate": {
             "type": "hyperband",
             "min_iter": 5,
