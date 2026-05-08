@@ -1,7 +1,10 @@
-# Scientific Knowledge Production Simulation - Quick Start
+# Reinforcement Learning in the Game of Science - Quick Start
+
+Quick start guide for the Reinforcement Learning in the Game of Science. Train and evaluate RL agents in a simulated scientific environment, comparing against heuristic policies.
 
 ## Prerequisites
-- Python 3.9+
+- Python 3.12
+- Weights and Biases account and API key
 - Use a virtual environment and install dependencies:
 
 ```bash
@@ -10,90 +13,124 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-## Run the Simulation
-Runs the simulation for one random seed and three reward functions and saves the results.
+## General
 
+All runnable scripts are stored in the folder scripts/. In addition, there are cli arguments for all scripts that can be used to configure the run. Use `--help` to see all the options.
+For example:
 ```bash
-python legacy/run_policy_simulation.py
+python scripts/train_rl_agent.py --help
 ```
 
+For the training and hyperparameter tuning scripts, there is a `
+    --use-light-policy-obs` cli argument that can be used to enable a lightweight observation für the archetypes.
+This increases training speed by about 30%. 
+
+## Algorithms
+
+At the moment, there are three supported algorithms:
+- PPO
+- APPO
+- DreamerV3
+
+## Hyperparameter Tuning
+Hyperparameter tuning is supported for PPO and APPO via Weights and Biases bayesian optimization.
+
+To run hyperparameter tuning run:
+```bash
+python scripts/wandb_sweep_rl_agent.py --algo "PPO" --count 10
+```
+The above command will run 10 hyperparameter sweeps for PPO.
+
+## Training
+
+### Checkpointing
+All training checkpoints are saved to the `checkpoints/` directory.
+Checkpoints are automatically saved after a specific number of training iterations or when achieving new best eval/reward.
 
 
-Outputs (written in the repo root and `log/`):
-- `balanced_summary.json`: high-level results (steps, rewards, success rate, policy distribution)
-- `log/balanced_actions.jsonl`: actions taken each step (JSONL)
-- `log/balanced_observations.jsonl`: observations per step (JSONL)
-- `log/balanced_projects.json`: final project states
-- `log/balanced_area.pickle`: serialized environment state
-
-Tune the call to `run_simulation_with_policies(...)` in `legacy/run_policy_simulation.py` to change:
-- `n_agents`, `max_steps`, `n_groups`, `max_peer_group_size`
-- `policy_distribution` (see `POLICY_CONFIGS` in the same file)
-- `output_file_prefix` (affects filenames)
-
-## Run Calibration
-
-Run the calibration script with this command (to do this the real world data sets are necessary).
-````bash
-python scripts/calibrate.py
-````
-
-## Agent Policies (in `src/reputation_environment/agent_policies.py`)
-
-- Careerist (`careerist`)
-  - Picks high-prestige opportunities above a threshold.
-  - Collaborates with active peers at/above the active-peer average reputation.
-  - Effort goes to the closest-deadline running project that still needs work.
-
-- Orthodox Scientist (`orthodox_scientist`)
-  - Prefers lowest-novelty opportunities; ties break toward higher prestige.
-  - Collaborates with all active peers who have close topic centroids.
-  - Effort prioritizes projects already below 90% of required effort; otherwise best peer fit.
-
-- Mass Producer (`mass_producer`)
-  - Take project if the (effort × time window) is relatively low.
-  - Collaborates with all active peers within the action mask.
-  - Effort goes to the closest-deadline running project that still needs work.
-
-Shared safety: if a running project risks missing its requirement given remaining time, policies skip selecting a new project that step.
-
-## Inspect Results
-Run `python analysis/process_results.py` to create reward trajectories for log files of simulation runs of 10 seeds. **Do not run this if you have not run the full simulation for all 10 seeds beforehand!**
-
-To simply reproduce the figures you can use the saved results in `results`.
-
-Run `notebooks/visualizations.ipynb` to reproduce the figures.
-
-## Tips
-- JSONL logs can be large; use `jq`, `tail -f`, or sample lines.
-- Commit parameter changes alongside their `*_summary.json` for reproducibility.
-
-## Run RL agent training with Ray RLlib
-Supported algorithms: `PPO`, `APPO`, `DREAMERV3`.
+### PPO / APPO
+Train a PPO or APPO agent using Ray RLlib:
 
 ```bash
-# Default: PPO
-python scripts/train_rl_agent.py
-
-# Using APPO
-python scripts/train_rl_agent.py --algo APPO
-
-# Using DreamerV3 (requires more resources, GPU recommended)
-python scripts/train_rl_agent.py --algo DREAMERV3
+python scripts/train_rl_agent.py --algo PPO --iterations 100 --policy-config Balanced
 ```
-## Run the simulation with a trained RL agent
+
+**Key arguments:**
+- `--algo`: Algorithm to use (`PPO` or `APPO`)
+- `--iterations`: Number of training iterations
+- `--policy-config`: Policy distribution for other agents (e.g., `Balanced`, `All Careerist`)
+- `--total-env-steps`: Total environment steps (alternative to iterations)
+- `--num-workers`: Number of parallel workers for data collection
+- `--train-batch-size`: Training batch size
+- `--lr`: Learning rate
+- `--use-light-policy-obs`: Use lightweight observations (recommended for faster training)
+
+**Example with custom hyperparameters:**
 ```bash
-python scripts/run_policy_simulation_with_rl_agent.py \
-  --checkpoint "checkpoints\09-04-2026\balanced_by_effort_iter0019_mrl50_09-04-01-52_eval4.87_best" \
-  --seed 101 \
-  --num-seeds 10 \
-  --all-rewards
+python scripts/train_rl_agent.py \
+    --algo APPO \
+    --total-env-steps 500000 \
+    --lr 0.0001 \
+    --num-workers 8 \
+    --train-batch-size 10000 \
+    --use-light-policy-obs
 ```
-- `--checkpoint`: Path to the checkpoint directory containing the trained RL agent model. The checkpoint directory should contain the necessary files for loading the model, such as the model weights and configuration.
-- `--seed`: Starting seed for the simulation.
-- `--num-seeds`: Number of seeds to run the simulation with. Each seed will have a different random seed for reproducibility.
-- `--all-rewards`: If set, the script will print all rewards for each episode instead of just the final reward.
 
-## Overleaf workflow
-- After writing in Overleaf pull the latest version from Overleaf with `git subtree pull --prefix thesis overleaf OVERLEAF_BRANCH --squash`
-- then `git push origin main`
+### DreamerV3
+Train a DreamerV3 agent:
+
+```bash
+python scripts/train_dreamerv3.py --episodes 1000 --policy-config Balanced
+```
+
+**Key arguments:**
+- `--episodes`: Number of training episodes
+- `--policy-config`: Policy distribution for other agents
+- `--batch-size`: Batch size for model training
+- `--lr`: Learning rate
+
+## Evaluation
+
+Evaluate a trained RL agent checkpoint:
+
+```bash
+python scripts/eval_rl_agent.py --checkpoint checkpoints/01-05-2026/balanced_by_effort_iter0011_mrl50_44fwk28s_01-05-20-50_eval14.74_best
+```
+
+**Key arguments:**
+- `--checkpoint`: Path to the trained model checkpoint
+- `--policy-config`: Policy distribution for other agents (must match training)
+- `--seed`: Random seed for reproducibility
+- `--n-agents`: Number of agents in the simulation
+- `--max-steps`: Maximum number of simulation steps
+
+**Example:**
+```bash
+python scripts/eval_rl_agent.py \
+    --checkpoint checkpoints/PPO_checkpoint_000100 \
+    --policy-config Balanced \
+    --seed 42 \
+```
+
+### Output
+
+Evaluation outputs include:
+- **JSON files**: Detailed episode data (observations, actions, rewards)
+- Stored in directory `test_results/`
+
+## Analysis
+
+Analysis notebooks are available in the `notebook/` directory. Some notebooks need processed data.
+Processing can be done wiht the scripts:
+
+- `analysis/process_rl_results.py`
+- `analysis/process_rl_actions_and_obs.py`
+
+Notebooks:
+- `aggregate_obs_actions_for_similarity_analysis.py`: Analyze observation and action patterns
+- `benchmark_light_observation.py`: Compare performance of light vs. full observations
+- `validate_light_observation.py`: Verify correctness of light observation wrapper
+
+
+
+

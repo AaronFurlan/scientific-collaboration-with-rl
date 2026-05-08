@@ -14,3 +14,4 @@ ray[rllib]
 pytest
 lightning
 scikit-learn
+wandb
