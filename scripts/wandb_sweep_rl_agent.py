@@ -52,6 +52,7 @@ def sweep_train():
             "novelty_threshold": 0.4,
             "effort_threshold": 38,
             "controlled_agent_id": "agent_0",
+            "use_light_policy_obs": True,  # Verwende immer light observations
             "wandb_mode": "online",
             "train_batch_size": 2000,
             "num_workers": 6,
@@ -135,7 +136,7 @@ def create_sweep_config(project_name="game-of-science-sweeps", algo="PPO"):
             "max": 0.96
         },
         "train_batch_size": {
-            "values": [8000, 10000, 12000]
+            "values": [1000, 2000, 4000]
         },
         "total_env_steps": {
             "value": 300000
