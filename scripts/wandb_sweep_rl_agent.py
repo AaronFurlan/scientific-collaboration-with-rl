@@ -31,7 +31,7 @@ def sweep_train():
         # 2. Standardparameter (Base) definieren
         # Diese Werte werden verwendet, wenn sie nicht im Sweep definiert sind.
         params = {
-            "algo": "PPO",
+            "algo": config.get("algo", "PPO"),  # Kann per Sweep konfiguriert werden
             "iterations": 20,
             "framework": "torch",
             "policy_config_name": "Balanced",
@@ -93,18 +93,25 @@ def sweep_train():
                 ray.shutdown()
             raise e
 
-def create_sweep_config(project_name="game-of-science-sweeps"):
+def create_sweep_config(project_name="game-of-science-sweeps", algo="PPO"):
     """
     Erstellt die Konfiguration für den WandB Sweep.
+
+    Args:
+        project_name: WandB Projektname
+        algo: Algorithmus - "PPO" oder "APPO"
     """
     sweep_configuration = {
         "method": "bayes",  # Bayesianische Optimierung statt Grid Search
-        "name": "RL Bayesian Hyperparameter Search Expanded",
+        "name": f"RL {algo} Bayesian Hyperparameter Search",
         "metric": {
             "name": "train/episode_return_mean",
             "goal": "maximize"
         },
         "parameters": {
+            "algo": {
+                "value": algo  # Fest für diesen Sweep
+            },
             "lr": {
                 "distribution": "log_uniform_values",
                 "min": 1e-5,
@@ -163,13 +170,15 @@ if __name__ == "__main__":
     parser.add_argument("--sweep_id", type=str, default=None, help="Existierende Sweep ID")
     parser.add_argument("--project", type=str, default="game-of-science-sweeps")
     parser.add_argument("--count", type=int, default=None, help="Anzahl der Runs (nur für random/bayes)")
-    
+    parser.add_argument("--algo", type=str, default="PPO", choices=["PPO", "APPO"],
+                        help="RL Algorithmus für den Sweep (PPO oder APPO)")
+
     args = parser.parse_args()
-    
+
     if args.sweep_id is None:
         # Erstelle neuen Sweep
-        print("Creating new sweep...")
-        sweep_id = create_sweep_config(project_name=args.project)
+        print(f"Creating new sweep for {args.algo}...")
+        sweep_id = create_sweep_config(project_name=args.project, algo=args.algo)
         print(f"Sweep created with ID: {sweep_id}")
     else:
         sweep_id = args.sweep_id
