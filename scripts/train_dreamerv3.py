@@ -933,7 +933,7 @@ if __name__ == "__main__":
     parser.add_argument("--debug-action-mask-steps", type=int, default=50, help="Number of initial steps to always debug")
     parser.add_argument("--debug-action-mask-interval", type=int, default=100, help="Debug every N steps after initial period")
     parser.add_argument("--debug-action-mask-jsonl", type=str, default=None, help="Path to JSONL log file for action mask debugging")
-    parser.add_argument("--invalid-action-penalty", type=float, default=0.0, help="Reward penalty per invalid action head (e.g., 0.1)")
+    parser.add_argument("--invalid-action-penalty", type=float, default=0.01, help="Reward penalty per invalid action head (e.g., 0.1)")
 
     args = parser.parse_args()
 
