@@ -283,6 +283,35 @@ def mass_producer_policy(
     }
 
 
+def random_policy(
+    observation: Dict[str, Any],
+    action_mask: Dict[str, np.ndarray],
+    **kwargs,
+) -> Dict[str, Any]:
+    rng = kwargs.get("rng", np.random.default_rng())
+
+    # Random project choice (0 or 1, respecting mask)
+    choose_project_mask = action_mask.get("choose_project")
+    valid_choices = np.where(choose_project_mask > 0)[0]
+    chosen_project = int(rng.choice(valid_choices)) if len(valid_choices) > 0 else 0
+
+    # Random collaboration (binary mask for each peer)
+    collaborate_mask = action_mask.get("collaborate_with")
+    collaborate_with = rng.integers(0, 2, size=len(collaborate_mask), dtype=np.int8)
+    collaborate_with = (collaborate_with & (collaborate_mask > 0)).astype(np.int8)
+
+    # Random effort assignment
+    put_effort_mask = action_mask.get("put_effort")
+    valid_efforts = np.where(put_effort_mask > 0)[0]
+    put_effort = int(rng.choice(valid_efforts)) if len(valid_efforts) > 0 else 0
+
+    return {
+        "choose_project": chosen_project,
+        "collaborate_with": collaborate_with,
+        "put_effort": put_effort,
+    }
+
+
 def do_nothing_policy(_: Dict[str, Any], action_mask: Dict[str, np.ndarray]):
     return {
         "choose_project": 0,
@@ -301,6 +330,7 @@ def get_policy_function(policy_name: str):
         "orthodox_scientist": orthodox_scientist_policy,
         "mass_producer": mass_producer_policy,
         "maximally_collaborative": maximally_collaborative_policy,
+        "random": random_policy,
     }
     if policy_name not in policies:
         raise ValueError(
