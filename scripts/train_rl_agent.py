@@ -1789,7 +1789,7 @@ if __name__ == "__main__":
         help="If set, uses lightweight observations for heuristic agents to speed up training.",
     )
 
-    parser.add_argument("--train-batch-size", type=int, default=2000,
+    parser.add_argument("--train-batch-size", type=int, default=1000,
                         help="Number of env steps collected per training iteration.")
 
     parser.add_argument("--vf-share-layers", action="store_true", default=True,
@@ -1813,20 +1813,20 @@ if __name__ == "__main__":
                         help="Number of steps to collect per fragment.")
 
     # RL training hyperparameters
-    parser.add_argument("--gamma", type=float, default=0.9583432181048404)
+    parser.add_argument("--gamma", type=float, default=0.9594649595268422)
     parser.add_argument("--lambda", dest="lambda_", type=float, default=0.9626992994491804)
-    parser.add_argument("--lr", type=float, default=0.00020375077263171516)
+    parser.add_argument("--lr", type=float, default=0.0001666285629775726)
     parser.add_argument("--num-epochs", type=int, default=3)
-    parser.add_argument("--entropy-coeff", type=float, default=0.005515494202562797)
-    parser.add_argument("--vf-loss-coeff", type=float, default=1.941963717117803)
-    parser.add_argument("--grad-clip", type=float, default=0.5223688871667344)
+    parser.add_argument("--entropy-coeff", type=float, default=0.005259081226297787)
+    parser.add_argument("--vf-loss-coeff", type=float, default=1.950465663697185)
+    parser.add_argument("--grad-clip", type=float, default=0.5045709931687762)
 
     # APPO-specific hyperparameters
     parser.add_argument("--vtrace", action="store_true", default=True,
                         help="Use V-trace for APPO (default: True).")
-    parser.add_argument("--vtrace-clip-rho-threshold", type=float, default=1.0,
+    parser.add_argument("--vtrace-clip-rho-threshold", type=float, default=1.1397445143262952,
                         help="V-trace clip rho threshold for APPO (default: 1.0).")
-    parser.add_argument("--vtrace-clip-pg-rho-threshold", type=float, default=1.0,
+    parser.add_argument("--vtrace-clip-pg-rho-threshold", type=float, default=1.3925231520603747,
                         help="V-trace clip policy gradient rho threshold for APPO (default: 1.0).")
     parser.add_argument("--target-network-update-freq", type=int, default=1,
                         help="Target network update frequency for APPO (default: 1).")
