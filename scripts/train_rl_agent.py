@@ -865,6 +865,19 @@ def main(
         print(f"[ERROR] Training base seed {seed} is out of range [1 - 100].")
         sys.exit(1)
 
+    # Auto-adjust iterations based on max_env_steps
+    if iterations == 0:
+        # iterations=0 means: ignore iteration limit, only use max_env_steps
+        # Set to a very large number so the iteration loop never stops by itself
+        iterations = 999999
+        print(f"[INFO] iterations=0 detected. Using only max_env_steps={max_env_steps} as stopping criterion.")
+    else:
+        # Estimate: with train_batch_size steps per iteration, calculate needed iterations
+        estimated_iterations = int(max_env_steps / train_batch_size) + 10  # +10 buffer
+        if iterations < estimated_iterations:
+            print(f"[INFO] Adjusting iterations from {iterations} to {estimated_iterations} to reach max_env_steps={max_env_steps}")
+            iterations = estimated_iterations
+
     # 1) Ray init (robust, begrenzte Ressourcen)
     ray.init(
         ignore_reinit_error=True,
@@ -1686,7 +1699,8 @@ if __name__ == "__main__":
     )
 
     # RLlib
-    parser.add_argument("--iterations", type=int, default=20)
+    parser.add_argument("--iterations", type=int, default=0,
+                        help="Max training iterations (0 = unlimited, only stop at max-env-steps)")
     parser.add_argument(
         "--framework",
         type=str,
