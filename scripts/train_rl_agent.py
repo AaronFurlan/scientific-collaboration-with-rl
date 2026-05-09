@@ -532,6 +532,7 @@ POLICY_CONFIGS: Dict[str, Dict[str, float]] = {
     "All Careerist": {"careerist": 1.0, "orthodox_scientist": 0.0, "mass_producer": 0.0},
     "All Orthodox": {"careerist": 0.0, "orthodox_scientist": 1.0, "mass_producer": 0.0},
     "All Mass Producer": {"careerist": 0.0, "orthodox_scientist": 0.0, "mass_producer": 1.0},
+    "All Random": {"random": 1.0},
     "Balanced": {"careerist": 1 / 3, "orthodox_scientist": 1 / 3, "mass_producer": 1 / 3},
     "Careerist Heavy": {"careerist": 0.5, "orthodox_scientist": 0.5, "mass_producer": 0.0},
     "Orthodox Heavy": {"careerist": 0.5, "orthodox_scientist": 0.0, "mass_producer": 0.5},
@@ -619,6 +620,14 @@ def make_env_creator(
                 obs = nested_obs["observation"]
                 mask = nested_obs["action_mask"]
                 return mass_prod_fn(obs, mask, effort_threshold)
+            return _fn
+
+        if policy_name == "random":
+            random_fn = get_policy_function("random")
+            def _fn(nested_obs):
+                obs = nested_obs["observation"]
+                mask = nested_obs["action_mask"]
+                return random_fn(obs, mask)
             return _fn
 
         # Fallback
@@ -762,6 +771,14 @@ def main(
     rollout_fragment_length: str | int = 200,
     total_env_steps: int | None = None,
     checkpoint: str | None = None,
+    # APPO-specific parameters
+    vtrace: bool = True,
+    vtrace_clip_rho_threshold: float = 1.0,
+    vtrace_clip_pg_rho_threshold: float = 1.0,
+    target_network_update_freq: int = 1,
+    num_sgd_iter: int = 1,
+    minibatch_buffer_size: int = 1,
+    replay_proportion: float = 0.0,
 ):
 
     # Seed all RNGs (random, numpy, torch, cuda) for reproducibility
@@ -1089,8 +1106,14 @@ def main(
                 grad_clip=grad_clip,
                 entropy_coeff=entropy_coeff,
                 vf_loss_coeff=vf_loss_coeff,
-                # APPO-specific: minibatch_buffer_size must be 1 for CPU-only (no multi-GPU)
-                minibatch_buffer_size=1,
+                # APPO-specific parameters
+                vtrace=vtrace,
+                vtrace_clip_rho_threshold=vtrace_clip_rho_threshold,
+                vtrace_clip_pg_rho_threshold=vtrace_clip_pg_rho_threshold,
+                target_network_update_freq=target_network_update_freq,
+                num_sgd_iter=num_sgd_iter,
+                minibatch_buffer_size=minibatch_buffer_size,
+                replay_proportion=replay_proportion,
                 # APPO-specific: Reduce broadcast frequency to reduce overhead
                 broadcast_interval=2,
                 # APPO-specific: Increase queue timeout to prevent premature _queue.Empty
@@ -1790,13 +1813,29 @@ if __name__ == "__main__":
                         help="Number of steps to collect per fragment.")
 
     # RL training hyperparameters
-    parser.add_argument("--gamma", type=float, default=0.997)
-    parser.add_argument("--lambda", dest="lambda_", type=float, default=0.98)
-    parser.add_argument("--lr", type=float, default=0.0001)
+    parser.add_argument("--gamma", type=float, default=0.9583432181048404)
+    parser.add_argument("--lambda", dest="lambda_", type=float, default=0.9626992994491804)
+    parser.add_argument("--lr", type=float, default=0.00020375077263171516)
     parser.add_argument("--num-epochs", type=int, default=3)
-    parser.add_argument("--entropy-coeff", type=float, default=0.01)
-    parser.add_argument("--vf-loss-coeff", type=float, default=0.5)
-    parser.add_argument("--grad-clip", type=float, default=1.0)
+    parser.add_argument("--entropy-coeff", type=float, default=0.005515494202562797)
+    parser.add_argument("--vf-loss-coeff", type=float, default=1.941963717117803)
+    parser.add_argument("--grad-clip", type=float, default=0.5223688871667344)
+
+    # APPO-specific hyperparameters
+    parser.add_argument("--vtrace", action="store_true", default=True,
+                        help="Use V-trace for APPO (default: True).")
+    parser.add_argument("--vtrace-clip-rho-threshold", type=float, default=1.0,
+                        help="V-trace clip rho threshold for APPO (default: 1.0).")
+    parser.add_argument("--vtrace-clip-pg-rho-threshold", type=float, default=1.0,
+                        help="V-trace clip policy gradient rho threshold for APPO (default: 1.0).")
+    parser.add_argument("--target-network-update-freq", type=int, default=1,
+                        help="Target network update frequency for APPO (default: 1).")
+    parser.add_argument("--num-sgd-iter", type=int, default=1,
+                        help="Number of SGD iterations per batch for APPO (default: 1).")
+    parser.add_argument("--minibatch-buffer-size", type=int, default=1,
+                        help="Replay buffer size in minibatches for APPO (default: 1).")
+    parser.add_argument("--replay-proportion", type=float, default=0.0,
+                        help="Proportion of replay vs. new data for APPO (default: 0.0).")
 
     args = parser.parse_args()
 
@@ -1848,4 +1887,12 @@ if __name__ == "__main__":
         num_envs_per_worker=args.num_envs_per_worker,
         rollout_fragment_length=args.rollout_fragment_length,
         checkpoint=args.checkpoint,
+        # APPO-specific parameters
+        vtrace=args.vtrace,
+        vtrace_clip_rho_threshold=args.vtrace_clip_rho_threshold,
+        vtrace_clip_pg_rho_threshold=args.vtrace_clip_pg_rho_threshold,
+        target_network_update_freq=args.target_network_update_freq,
+        num_sgd_iter=args.num_sgd_iter,
+        minibatch_buffer_size=args.minibatch_buffer_size,
+        replay_proportion=args.replay_proportion,
     )
