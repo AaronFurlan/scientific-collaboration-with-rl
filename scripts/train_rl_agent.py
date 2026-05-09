@@ -769,7 +769,7 @@ def main(
     vf_share_layers: bool = True,
     num_envs_per_worker: int = 1,
     rollout_fragment_length: str | int = 200,
-    total_env_steps: int | None = None,
+    max_env_steps: int = 1_000_000,
     checkpoint: str | None = None,
     # APPO-specific parameters
     vtrace: bool = True,
@@ -857,7 +857,7 @@ def main(
         "vf_share_layers": vf_share_layers,
         "num_envs_per_worker": num_envs_per_worker,
         "rollout_fragment_length": rollout_fragment_length,
-        "total_env_steps": total_env_steps,
+        "max_env_steps": max_env_steps,
     }
 
     # Validate seed range [1 - 100]
@@ -922,7 +922,7 @@ def main(
                     "num_workers": _wandb_num_workers,
                     "num_envs_per_worker": num_envs_per_worker,
                     "rollout_fragment_length": rollout_fragment_length,
-                    "total_env_steps": total_env_steps,
+                    "max_env_steps": max_env_steps,
                     "training": {
                         "gamma": gamma,
                         "lambda": lambda_,
@@ -1334,11 +1334,10 @@ def main(
         print(f"reward_function: {reward_function}, acceptance_threshold: {acceptance_threshold}\n")
 
         for i in range(iterations):
-            # Check if we reached the total environment steps limit
-            if total_env_steps is not None:
-                if total_steps_sampled >= total_env_steps:
-                    print(f"\nReached total_env_steps limit ({total_env_steps}). Total steps sampled: {total_steps_sampled}. Stopping training.")
-                    break
+            # Check if we reached the max environment steps limit
+            if total_steps_sampled >= max_env_steps:
+                print(f"\nReached max_env_steps limit ({max_env_steps}). Total steps sampled: {total_steps_sampled}. Stopping training.")
+                break
 
             try:
                 result = algo_instance.train()
@@ -1811,6 +1810,8 @@ if __name__ == "__main__":
                         help="Number of environments per worker.")
     parser.add_argument("--rollout-fragment-length", type=int, default=200,
                         help="Number of steps to collect per fragment.")
+    parser.add_argument("--max-env-steps", type=int, default=1_000_000,
+                        help="Maximum number of environment steps to train (default: 1,000,000).")
 
     # RL training hyperparameters
     parser.add_argument("--gamma", type=float, default=0.9594649595268422)
@@ -1886,6 +1887,7 @@ if __name__ == "__main__":
         num_workers=args.num_workers,
         num_envs_per_worker=args.num_envs_per_worker,
         rollout_fragment_length=args.rollout_fragment_length,
+        max_env_steps=args.max_env_steps,
         checkpoint=args.checkpoint,
         # APPO-specific parameters
         vtrace=args.vtrace,
