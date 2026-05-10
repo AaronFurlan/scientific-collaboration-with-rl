@@ -5,7 +5,7 @@ Single-agent Gymnasium wrapper around a PettingZoo ParallelEnv that:
 
 1) Exposes one controlled agent through a standard Gymnasium API.
 2) Uses a multi-head Dict action space:
-   {"choose_project": Discrete, "put_effort": Discrete, "collaborate_with": Box}
+   {"choose_project": Discrete, "put_effort": Discrete, "collaborate_with": MultiDiscrete}
 3) Decodes and repairs actions using the env-provided action masks.
 4) Supports fixed policies for all non-controlled agents.
 5) Optionally applies a top-k collaboration ablation.
@@ -35,7 +35,7 @@ from pprint import pprint
 
 import numpy as np
 import gymnasium as gym
-from gymnasium.spaces import Box
+from gymnasium.spaces import Box, MultiDiscrete
 
 import logging
 
@@ -166,15 +166,17 @@ class RLLibSingleAgentWrapper(gym.Env):
         self._PE = int(self.env.max_projects_per_agent + 1)  # put_effort
         self._CB = int(self.env.max_peer_group_size)  # collaborate bits (max_peer_slots)
 
-        # Define discrete action spaces that match the environment
-        # RLlib will automatically create separate heads for each discrete component
+        # Define action spaces that match the environment
+        # RLlib will automatically create separate heads for each component
         # choose_project: Discrete(0, 1, 2, ...)
         # put_effort: Discrete(0, 1, 2, ..., 8)
-        # collaborate_with: Box([0, 1]^CB) for continuous collaboration intent
+        # collaborate_with: MultiDiscrete([2, 2, ..., 2]) for binary collaboration intent
+        #   Note: Using MultiDiscrete instead of MultiBinary for RLlib compatibility
+        #   Each element can be 0 (no collaboration) or 1 (collaborate)
         self.action_space = gym.spaces.Dict({
             "choose_project": gym.spaces.Discrete(self._CP),
             "put_effort": gym.spaces.Discrete(self._PE),
-            "collaborate_with": gym.spaces.Box(0, 1, shape=(self._CB,), dtype=np.float32)
+            "collaborate_with": gym.spaces.MultiDiscrete([2] * self._CB)
         })
 
 
@@ -250,18 +252,22 @@ class RLLibSingleAgentWrapper(gym.Env):
     def _decode_action(self, a: Any, agent_id: Optional[str] = None) -> ActionDict:
         """Pass-through or convert action into env dict format.
 
-        Now expects Dict actions with discrete choose_project and put_effort:
-        {'choose_project': int, 'put_effort': int, 'collaborate_with': ndarray or float}
+        Now expects Dict actions with discrete choose_project and put_effort,
+        and MultiDiscrete collaborate_with:
+        {'choose_project': int, 'put_effort': int, 'collaborate_with': binary int array}
+
+        The collaborate_with action comes from MultiDiscrete([2] * max_peer_group_size)
+        and contains binary (0/1) integer values directly.
         """
         # 1. Dictionary format (PRIMARY - from RLlib policy)
         if isinstance(a, dict):
             choose_project = int(a.get("choose_project", 0))
             put_effort = int(a.get("put_effort", 0))
-            collab = a.get("collaborate_with", np.zeros(self._CB, dtype=np.float32))
+            collab = a.get("collaborate_with", np.zeros(self._CB, dtype=np.int8))
 
-            # Threshold collaboration intent to binary bits
-            collab_bits = np.asarray(collab, dtype=np.float32)
-            collab_bits = (collab_bits > 0.5).astype(np.int8)
+            # Convert to binary integer array and clip to ensure valid values
+            collab_bits = np.asarray(collab, dtype=np.int8)
+            collab_bits = np.clip(collab_bits, 0, 1)
 
             return {
                 "choose_project": choose_project,
@@ -378,6 +384,47 @@ class RLLibSingleAgentWrapper(gym.Env):
 
         decoded["collaborate_with"] = c.astype(np.int8, copy=False)
         return decoded
+
+    def validate_action_space(self) -> bool:
+        """Validate that the action space is correctly configured with MultiDiscrete for collaborate_with.
+
+        Returns:
+            True if validation passes, raises AssertionError otherwise.
+        """
+        # Sample an action from the action space
+        sample_action = self.action_space.sample()
+
+        # Verify it's a dict with the expected keys
+        assert isinstance(sample_action, dict), f"Action should be dict, got {type(sample_action)}"
+        assert "choose_project" in sample_action, "Missing 'choose_project' in action"
+        assert "put_effort" in sample_action, "Missing 'put_effort' in action"
+        assert "collaborate_with" in sample_action, "Missing 'collaborate_with' in action"
+
+        # Verify collaborate_with is binary
+        collab = sample_action["collaborate_with"]
+        collab_array = np.asarray(collab)
+
+        # Check shape
+        assert collab_array.shape == (self._CB,), \
+            f"collaborate_with should have shape ({self._CB},), got {collab_array.shape}"
+
+        # Check all values are 0 or 1
+        assert np.all((collab_array == 0) | (collab_array == 1)), \
+            f"collaborate_with should contain only 0 or 1, got values: {np.unique(collab_array)}"
+
+        # Verify decoded action maintains binary format
+        decoded = self._decode_action(sample_action)
+        decoded_collab = decoded["collaborate_with"]
+
+        assert decoded_collab.shape == (self._CB,), \
+            f"Decoded collaborate_with should have shape ({self._CB},), got {decoded_collab.shape}"
+        assert decoded_collab.dtype == np.int8, \
+            f"Decoded collaborate_with should be int8, got {decoded_collab.dtype}"
+        assert np.all((decoded_collab == 0) | (decoded_collab == 1)), \
+            f"Decoded collaborate_with should contain only 0 or 1, got values: {np.unique(decoded_collab)}"
+
+        logger.info("Action space validation passed: MultiDiscrete collaborate_with is correctly configured")
+        return True
 
     # -----------------------------
     # Top-k collaboration helpers
