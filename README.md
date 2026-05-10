@@ -131,6 +131,10 @@ Notebooks:
 - `benchmark_light_observation.py`: Compare performance of light vs. full observations
 - `validate_light_observation.py`: Verify correctness of light observation wrapper
 
+## Overleaf workflow
+- After writing in Overleaf pull the latest version from Overleaf with `git subtree pull --prefix thesis overleaf OVERLEAF_BRANCH --squash`
+- then `git push origin main`
+
 
 
 
