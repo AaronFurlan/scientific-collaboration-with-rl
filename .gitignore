@@ -30,3 +30,4 @@ notebooks/analysis_results
 *.pt
 *.ckpt
 *.pkl
+nul
