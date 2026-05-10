@@ -1,17 +1,105 @@
-@inproceedings{christen_exogenous_2020,
-	address = {Budapest, Hungary},
-	title = {Exogenous {Data} for {Load} {Forecasting}: {A} {Review}:},
-	copyright = {All rights reserved},
-	isbn = {978-989-758-475-6},
-	shorttitle = {Exogenous {Data} for {Load} {Forecasting}},
-	url = {https://www.scitepress.org/DigitalLibrary/Link.aspx?doi=10.5220/0010213204890500},
-	doi = {10.5220/0010213204890500},
-	language = {en},
-	urldate = {2020-11-16},
-	booktitle = {Proceedings of the 12th {International} {Joint} {Conference} on {Computational} {Intelligence}},
-	publisher = {SCITEPRESS - Science and Technology Publications},
-	author = {Christen, Ramón and Mazzola, Luca and Denzler, Alexander and Portmann, Edy},
-	year = {2020},
-	keywords = {phd.mono.cited},
-	pages = {489--500},
+@misc{semmelrock2023reproducibilitymachinelearningdrivenresearch,
+  title        = {Reproducibility in Machine Learning-Driven Research},
+  author       = {Semmelrock, Harald and Kopeinik, Simone and Theiler, Dieter and Ross-Hellauer, Tony and Kowald, Dominik},
+  year         = {2023},
+  eprint       = {2307.10320},
+  archivePrefix= {arXiv},
+  primaryClass = {cs.LG},
+  url          = {https://arxiv.org/abs/2307.10320},
+  note         = {arXiv preprint},
+  keywords     = {Machine Learning, Artificial Intelligence, Reproducibility, Replicability}
+}
+
+@article{Gundersen_Kjensmo_2018,
+    title={State of the Art: Reproducibility in Artificial Intelligence},
+    volume={32},
+    url={https://ojs.aaai.org/index.php/AAAI/article/view/11503},
+    DOI={10.1609/aaai.v32i1.11503},
+    abstractNote={ &lt;p&gt; Background: Research results in artificial intelligence (AI) are criticized for not being reproducible. Objective: To quantify the state of reproducibility of empirical AI research using six reproducibility metrics measuring three different degrees of reproducibility. Hypotheses: 1) AI research is not documented well enough to reproduce the reported results. 2) Documentation practices have improved over time. Method: The literature is reviewed and a set of variables that should be documented to enable reproducibility are grouped into three factors: Experiment, Data and Method. The metrics describe how well the factors have been documented for a paper. A total of 400 research papers from the conference series IJCAI and AAAI have been surveyed using the metrics. Findings: None of the papers document all of the variables. The metrics show that between 20% and 30% of the variables for each factor are documented. One of the metrics show statistically significant increase over time while the others show no change. Interpretation: The reproducibility scores decrease with in- creased documentation requirements. Improvement over time is found. Conclusion: Both hypotheses are supported. &lt;/p&gt; },
+    number={1},
+    journal={Proceedings of the AAAI Conference on Artificial Intelligence},
+    author={Gundersen, Odd Erik and Kjensmo, Sigbjørn}, 
+    year={2018}, 
+    month={Apr.} 
+}
+
+@inproceedings{Nagarajan2018TheIO,
+  title={The Impact of Nondeterminism on Reproducibility in Deep Reinforcement Learning},
+  author={Prabhat Nagarajan and Garrett Warnell and Peter Stone},
+  year={2018},
+  url={https://openreview.net/forum?id=S1e-OsZ4e7},
+  booktitle={Reproducibility in Machine Learning Workshop (ICML 2018)},
+}
+
+@book{sutton2018reinforcement,
+  title     = {Reinforcement Learning: An Introduction},
+  author    = {Sutton, Richard S. and Barto, Andrew G.},
+  edition   = {2},
+  year      = {2018},
+  publisher = {MIT Press},
+  address   = {Cambridge, MA}
+}
+
+@unpublished{bless_game_of_science_2026,
+  author       = {Bless, Christof},
+  title        = {Modeling Scientific Knowledge Production as a Game},
+  year         = {2026},
+  note         = {Unpublished manuscript, under review}
+}
+
+@misc{mnih2016asynchronousmethodsdeepreinforcement,
+      title={Asynchronous Methods for Deep Reinforcement Learning}, 
+      author={Volodymyr Mnih and Adrià Puigdomènech Badia and Mehdi Mirza and Alex Graves and Timothy P. Lillicrap and Tim Harley and David Silver and Koray Kavukcuoglu},
+      year={2016},
+      eprint={1602.01783},
+      archivePrefix={arXiv},
+      primaryClass={cs.LG},
+      url={https://arxiv.org/abs/1602.01783}, 
+}
+
+@misc{schulman2017proximalpolicyoptimizationalgorithms,
+      title={Proximal Policy Optimization Algorithms}, 
+      author={John Schulman and Filip Wolski and Prafulla Dhariwal and Alec Radford and Oleg Klimov},
+      year={2017},
+      eprint={1707.06347},
+      archivePrefix={arXiv},
+      primaryClass={cs.LG},
+      url={https://arxiv.org/abs/1707.06347}, 
+}
+
+@misc{pytorch_reproducibility,
+  title        = {Reproducibility},
+  author       = {{PyTorch Developers}},
+  year         = {2024},
+  howpublished = {\url{https://pytorch.org/docs/stable/notes/randomness.html}},
+  note         = {Accessed: 2026-03-08}
+}
+
+@misc{hafner2024masteringdiversedomainsworld,
+      title={Mastering Diverse Domains through World Models}, 
+      author={Danijar Hafner and Jurgis Pasukonis and Jimmy Ba and Timothy Lillicrap},
+      year={2024},
+      eprint={2301.04104},
+      archivePrefix={arXiv},
+      primaryClass={cs.AI},
+      url={https://arxiv.org/abs/2301.04104}, 
+}
+
+@article{DBLP:journals/corr/abs-1912-00167,
+  author       = {Michael Luo and
+                  Jiahao Yao and
+                  Richard Liaw and
+                  Eric Liang and
+                  Ion Stoica},
+  title        = {{IMPACT:} Importance Weighted Asynchronous Architectures with Clipped
+                  Target Networks},
+  journal      = {CoRR},
+  volume       = {abs/1912.00167},
+  year         = {2019},
+  url          = {http://arxiv.org/abs/1912.00167},
+  eprinttype   = {arXiv},
+  eprint       = {1912.00167},
+  timestamp    = {Thu, 02 Jan 2020 18:08:18 +0100},
+  biburl       = {https://dblp.org/rec/journals/corr/abs-1912-00167.bib},
+  bibsource    = {dblp computer science bibliography, https://dblp.org}
 }

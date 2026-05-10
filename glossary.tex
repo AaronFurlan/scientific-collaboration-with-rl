@@ -1,29 +1,163 @@
-\newglossaryentry{cognitive computing}
+\newglossaryentry{reinforcement learning}
 {
-    name={Cognitive computing},
-    description={A set of theories and techniques to let computers to mimic the mechanisms of the human brain. It provides the basis for the practical application of cognition and learning theories to computer systems with the use of soft computing methods.}
+    name={Reinforcement Learning},
+    description={A learning paradigm in which an agent interacts with an environment and learns a policy to maximize expected cumulative reward through trial-and-error}
 }
 
-\newglossaryentry{perceptual computing}
+\newglossaryentry{agent}
 {
-    name={Perceptual computing},
-    description={A set of theories and techniques allowing computers to compute and reason with perceptions and imprecise data.}
+    name={Agent},
+    description={An entity that receives observations from its environment and performs actions to achieve a goal, typically defined as maximizing the expected cumulative return}
 }
 
-\newglossaryentry{fuzzy logic}
+\newglossaryentry{policy gradient}
 {
-    name={Fuzzy logic},
-    description={An extension of classical binary logic, where the truth value of propositions can not only be completely true or false, but also partially true and false to varying degree.}
+    name={Policy Gradient},
+    description={A reinforcement learning method that directly optimizes a parametrized policy $\pi_{\theta}(a|s)$ by performing gradient ascent on the expected cumulative return. The policy parameters are updated in the direction that increases the probability of rewarding actions \cite{sutton2018reinforcement}}
 }
 
-\newglossaryentry{cww}
+\newglossaryentry{general-sum game}
 {
-    name={Computing with words and perceptions},
-    description={A process allowing to perform computations on words, phrases, and prepositions drawn from a natural language, which describe perceptions of people towards different aspects of the context they are surrounded by. This is based on the fuzzy logic toolbox and allows to represent and perform operations on the meaning of words.}
+    name={General-Sum Game},
+    description={A type of strategic interaction in game theory where the total payoff to all players can very. Unlike in zero-sum-games one player's gain does not necessarily equal another's loss. The games allow for cooperative, competitive, win-win, or lose-lose outcomes}
 }
 
-\newglossaryentry{convolutional neural network}
+\newglossaryentry{reward function}
 {
-    name={Convolutional neural network},
-    description={A class of neural networks commonly used for image analysis that is relying on convolution operations to extract features from data.}
+    name={Reward Function},
+    description={
+    A function that specifies the expected immediate reward received after 
+    taking action $A_t$ in state $S_t$. It is commonly denoted as 
+    $r(s,a)$ or as the expected value of $R_{t+1}$ conditioned on 
+    $(S_t, A_t)$ \cite{sutton2018reinforcement}
+    }
+}
+
+\newglossaryentry{exploration-exploitation}
+{
+    name={Exploration vs. Exploitation},
+    description={
+    The fundamental trade-off in reinforcement learning between selecting 
+    actions that are known to yield high rewards (exploitation) and selecting 
+    actions to gather new information about the environment (exploration). 
+    An effective learning strategy balances both in order to maximize 
+    long-term return \cite{sutton2018reinforcement}
+    }
+}
+
+\newglossaryentry{environment}
+{
+    name={Environment},
+    description={
+    The external system with which the agent interacts. 
+    Given an action $A_t$, the environment transitions to a new state and 
+    produces a reward according to the transition dynamics 
+    $p(s', r \mid s,a)$ \cite{sutton2018reinforcement}
+    }
+}
+
+\newglossaryentry{state}
+{
+    name={State},
+    description={
+    A representation of the environment at a given time step, denoted as $S_t$. 
+    The state contains all information required to describe the decision-making 
+    situation at time $t$. After the agent selects an action $A_t$, 
+    the environment transitions to a new state $S_{t+1}$ according to 
+    the transition dynamics of the MDP \cite{sutton2018reinforcement}
+    }
+}
+
+\newglossaryentry{action}
+{
+    name={Action},
+    description={An element $a_{t}\in\mathcal{A}$ selected by the agent at time step $t$. In this work, an action consists of a composite decision including collaboration choice, project selection and effort allocation}
+}
+
+\newglossaryentry{reward}
+{
+    name={Reward},
+    description={
+    A feedback signal provided by the environment after the agent 
+    takes an action $A_t$ in state $S_t$. The reward, denoted as $R_{t+1}$, 
+    indicates the immediate desirability of the resulting transition and 
+    can be positive or negative \cite{sutton2018reinforcement}
+    }
+}
+
+\newglossaryentry{policy}
+{
+    name={Policy},
+    description={
+    A mapping from states to actions that defines the behavior of an agent. 
+    A policy can be deterministic or stochastic and is commonly denoted as 
+    $\pi(a \mid s)$. In reinforcement learning, the objective is to improve 
+    the policy in order to maximize the expected return. 
+    Policies may be represented explicitly (e.g. as lookup tables) or 
+    parameterized, for example by a neural network \cite{sutton2018reinforcement}
+    }
+}
+
+\newglossaryentry{return}
+{
+    name={Return},
+    description={
+    The cumulative reward that an agent aims to maximize. 
+    In the episodic case, the simplest form is the sum of future rewards:
+    \[
+    G_t \doteq R_{t+1} + R_{t+2} + \dots + R_T,
+    \]
+    where $T$ denotes the final time step \cite{sutton2018reinforcement}
+    }
+}
+
+\newglossaryentry{markov decision process}
+{
+    name={Markov Decision Process},
+    description={
+    A formal problem for sequential decision-making under uncertainty. 
+    An MDP is defined by a tuple $(\mathcal{S}, \mathcal{A}, P, R, \gamma)$, 
+    where $\mathcal{S}$ is the state space, $\mathcal{A}$ the action space, $P(s', r \mid s,a)$ the transition dynamics and $\gamma$ the discount factor for future rewards. Formally:
+    $$P(s', r|s,a)\doteq Pr\{S_{t}=s', R_t=r|S_{t-1}=s, A_{t-1}=a\}$$
+    The Markov property states that the next state and reward depend only on the current state and action, not on the full history \cite{sutton2018reinforcement} 
+    }
+}
+
+\newglossaryentry{discount_factor}
+{
+    name={Discount Factor},
+    description={
+    A scalar $\gamma \in [0,1]$ that determines how strongly future rewards are weighted relative to immediate rewards. 
+    In the discounted return,
+    \[
+    G_t \doteq \sum_{k=0}^{\infty} \gamma^k R_{t+k+1},
+    \]
+    smaller values of $\gamma$ prioritize short-term rewards, while values close to 1 emphasize long-term returns \cite{sutton2018reinforcement}
+    }
+}
+
+\newglossaryentry{on-off-policy learning}
+{
+    name={On-Policy / Off-Policy Learning},
+    description={
+    A distinction in reinforcement learning based on how data is collected. 
+    In on-policy learning, the agent improves the same policy that is used 
+    to generate behavior. In off-policy learning, the agent learns about a 
+    target policy while following a different behavior policy 
+    \cite{sutton2018reinforcement}
+    }
+}
+
+\newglossaryentry{value function}
+{
+    name={Value Function},
+    description={
+    A function that estimates the expected return of a state or a state--action pair 
+    under a given policy $\pi$. The state-value function is denoted as 
+    $v_\pi(s)$ and represents the expected return when starting from state $s$ 
+    and following policy $\pi$. The action-value function is denoted as 
+    $q_\pi(s,a)$ and represents the expected return when taking action $a$ 
+    in state $s$ and following policy $\pi$ 
+    \cite{sutton2018reinforcement}
+    }
 }
