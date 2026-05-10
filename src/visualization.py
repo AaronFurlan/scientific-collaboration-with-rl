@@ -358,8 +358,8 @@ def plot_rl_metrics_distribution(df_rl, strategy_name="by_effort"):
     plt.tight_layout()
     plt.show()
 
-def aggregate_empirical_results(strat, aggregation_dir):
-    df_h, df_rl_summary, df_rl_traj = get_path_for_strat(strat, aggregation_dir)
+def aggregate_empirical_results(strat, aggregation_dir, algo):
+    df_h, df_rl_summary, df_rl_traj = get_path_for_strat(strat, aggregation_dir, algo)
     if df_h is None or df_rl_summary is None or df_rl_traj is None:
         return
 

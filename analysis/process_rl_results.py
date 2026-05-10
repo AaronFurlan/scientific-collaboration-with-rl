@@ -140,7 +140,7 @@ def main():
     args = parser.parse_args()
 
     seeds = range(args.start_seed, args.start_seed + args.num_seeds)
-    strategies = ["multiply", "evenly", "by_effort"]
+    strategies = ["by_effort"]
     
     log_dir = args.log_dir
     
