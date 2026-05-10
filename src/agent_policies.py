@@ -288,22 +288,32 @@ def random_policy(
     action_mask: Dict[str, np.ndarray],
     **kwargs,
 ) -> Dict[str, Any]:
+    """
+    Random policy that samples uniformly from ALL possible actions,
+    NOT just valid ones (to match RL agent behavior).
+
+    The RL agent samples from the full action space and then repairs
+    invalid actions using the mask. This random baseline should do the same
+    for a fair comparison.
+
+    Note: The wrapper (_apply_action_mask) will repair invalid actions,
+    just like it does for the RL agent.
+    """
     rng = kwargs.get("rng", np.random.default_rng())
 
-    # Random project choice (0 or 1, respecting mask)
-    choose_project_mask = action_mask.get("choose_project")
-    valid_choices = np.where(choose_project_mask > 0)[0]
-    chosen_project = int(rng.choice(valid_choices)) if len(valid_choices) > 0 else 0
+    # Get action space dimensions from masks
+    n_projects = len(action_mask.get("choose_project", [2]))  # Usually 2 (0 or 1)
+    n_peers = len(action_mask.get("collaborate_with", []))
+    n_effort_levels = len(action_mask.get("put_effort", []))
 
-    # Random collaboration (binary mask for each peer)
-    collaborate_mask = action_mask.get("collaborate_with")
-    collaborate_with = rng.integers(0, 2, size=len(collaborate_mask), dtype=np.int8)
-    collaborate_with = (collaborate_with & (collaborate_mask > 0)).astype(np.int8)
+    # Random project choice from ALL possible projects (not just valid)
+    chosen_project = int(rng.integers(0, n_projects))
 
-    # Random effort assignment
-    put_effort_mask = action_mask.get("put_effort")
-    valid_efforts = np.where(put_effort_mask > 0)[0]
-    put_effort = int(rng.choice(valid_efforts)) if len(valid_efforts) > 0 else 0
+    # Random collaboration from ALL possible binary combinations (not just valid)
+    collaborate_with = rng.integers(0, 2, size=n_peers, dtype=np.int8)
+
+    # Random effort from ALL possible effort levels (not just valid)
+    put_effort = int(rng.integers(0, n_effort_levels))
 
     return {
         "choose_project": chosen_project,

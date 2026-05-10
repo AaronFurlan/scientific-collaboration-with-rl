@@ -274,6 +274,63 @@ def build_other_policies(
     return other_policies
 
 
+def apply_action_mask_repair(action: Dict[str, Any], action_mask: Dict[str, np.ndarray]) -> Dict[str, Any]:
+    """
+    Repair invalid actions using the action mask.
+
+    This EXACTLY mirrors the behavior of RLLibSingleAgentWrapper._apply_action_mask()
+    to ensure fair comparison between random baseline and RL agent.
+
+    The RL agent samples from the full action space and then repairs invalid
+    actions. The random agent should do the same.
+
+    IMPORTANT: Invalid discrete actions (choose_project, put_effort) are set to 0,
+    NOT to the first valid option. This matches the wrapper behavior.
+    """
+    if not isinstance(action_mask, dict):
+        return action
+
+    repaired = action.copy()
+
+    # Repair choose_project (EXACT wrapper logic)
+    cp_mask = np.asarray(action_mask.get("choose_project", []))
+    if cp_mask.size > 0:
+        cp = int(repaired.get("choose_project", 0))
+        if cp < 0 or cp >= cp_mask.size or cp_mask[cp] <= 0:
+            repaired["choose_project"] = 0  # ← Same as wrapper: always 0!
+
+    # Repair put_effort (EXACT wrapper logic)
+    pe_mask = np.asarray(action_mask.get("put_effort", []))
+    if pe_mask.size > 0:
+        pe = int(repaired.get("put_effort", 0))
+        if pe < 0 or pe >= pe_mask.size or pe_mask[pe] <= 0:
+            repaired["put_effort"] = 0  # ← Same as wrapper: always 0!
+
+    # Repair collaborate_with (EXACT wrapper logic)
+    c_mask = np.asarray(action_mask.get("collaborate_with", []))
+    if c_mask.size > 0:
+        c = np.asarray(repaired.get("collaborate_with", []), dtype=np.int8)
+        # Ensure correct size
+        if c.size != c_mask.size:
+            c = np.zeros(c_mask.size, dtype=np.int8)
+
+        # Apply mask: set invalid collaborations to 0
+        allowed = (c_mask > 0)
+        L = min(len(c), len(allowed))
+
+        c_slice = c[:L]
+        allowed_slice = allowed[:L]
+        c_slice[~allowed_slice] = 0
+        c[:L] = c_slice
+
+        if len(c) > L:
+            c[L:] = 0
+
+        repaired["collaborate_with"] = c.astype(np.int8)
+
+    return repaired
+
+
 # ---------------------------------------------------------------------------
 # Main simulation
 # ---------------------------------------------------------------------------
@@ -350,12 +407,14 @@ def run_simulation_with_random_agent(cfg: EvalConfig) -> dict:
             nested_obs = observations[agent]
 
             if agent == cfg.controlled_agent_id and env.active_agents[agent_idx] == 1:
-                # Random agent: sample uniformly from valid actions
+                # Random agent: sample uniformly from ALL actions (not just valid)
                 action = random_policy_fn(
                     nested_obs["observation"],
                     nested_obs["action_mask"],
                     rng=random_rng
                 )
+                # Apply mask repair (just like RL agent in wrapper)
+                action = apply_action_mask_repair(action, nested_obs["action_mask"])
                 actions[agent] = action
             else:
                 # Heuristic or inactive agent
