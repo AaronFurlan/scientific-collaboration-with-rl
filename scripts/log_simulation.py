@@ -15,18 +15,15 @@ class SimLog:
         self.project_path = os.path.join(logs_dir, project_path)
 
     def start(self):
-        # Delete existing files if they exist
         for file_path in [self.action_path, self.observation_path, self.project_path]:
             if os.path.exists(file_path):
                 os.remove(file_path)
 
     def log_action(self, action: Dict):
-        # Append JSONL row
         with open(self.action_path, "a") as jf:
             jf.write(json.dumps(convert_numpy(action)) + "\n")
 
     def log_observation(self, obs: Dict):
-        # Append JSONL row
         with open(self.observation_path, "a") as jf:
             jf.write(json.dumps(convert_numpy(obs)) + "\n")
 
@@ -35,9 +32,8 @@ class SimLog:
             json.dump([convert_numpy(p.to_dict()) for p in projects], jf, indent=2)
 
 
-# Convert numpy arrays to lists for JSON serialization (handles nested structures)
 def convert_numpy(obj):
-    if hasattr(obj, "tolist"):  # numpy arrays
+    if hasattr(obj, "tolist"):
         return obj.tolist()
     elif isinstance(obj, dict):
         return {k: convert_numpy(v) for k, v in obj.items()}

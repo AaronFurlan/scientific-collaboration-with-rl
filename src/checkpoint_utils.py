@@ -1,17 +1,4 @@
-"""
-checkpoint_utils.py
-
-Utilities for building explicit, descriptive checkpoint paths for RLlib training runs.
-
-Checkpoint naming convention:
-    <policy>_<reward>_iter<N>_mrl<M>_<dd-mm-HH-MM>_eval<X>[_<tag>]
-
-Directory structure:
-    <base_dir>/<dd-mm-yyyy>/  (one subfolder per calendar day)
-
-Example:
-    checkpoints/10-03-2026/balanced_by_effort_iter0004_mrl500_10-03-14-30_eval12.35_best/
-"""
+"""Utilities for building descriptive checkpoint paths for RLlib training."""
 
 from __future__ import annotations
 
@@ -33,38 +20,22 @@ def build_checkpoint_path(
     wandb_run_id: Optional[str] = None,
     tag: str = "",
 ) -> str:
-    """Build an explicit checkpoint directory path with dynamic naming.
+    """
+    Build checkpoint directory path with naming convention:
+    <base_dir>/<dd-mm-yyyy>/<algo>_<policy>_<reward>_iter<N>_mrl<M>_<timestamp>_eval<X>[_<tag>]/
 
-    Structure:
-        <base_dir>/<dd-mm-yyyy>/<algo>_<policy>_<reward>_iter<N>_mrl<M>[_<wandb_id>]_<dd-mm-HH-MM>_eval<X>[_<tag>]/
+    Args:
+        base_dir: Root checkpoint directory
+        algo: Algorithm name (e.g., "ppo")
+        policy_config_name: Policy distribution name
+        reward_function: Reward scheme identifier
+        iteration: Training iteration number
+        max_rewardless_steps: Environment parameter
+        eval_return: Evaluation return (None/NaN → "eval_na")
+        tag: Optional suffix (e.g., "best", "periodic")
 
-    A daily subfolder is created automatically if it does not exist yet.
-
-    Parameters
-    ----------
-    base_dir : str
-        Root directory for all checkpoints (default: ``"checkpoints"``).
-    algo : str
-        Name of the algorithm (e.g. ``"ppo"``, ``"appo"``).
-    policy_config_name : str
-        Name of the policy distribution (e.g. ``"Balanced"``).
-    reward_function : str
-        Reward scheme identifier (e.g. ``"by_effort"``).
-    iteration : int
-        Current training iteration number.
-    max_rewardless_steps : int
-        Environment parameter – embedded in the folder name for traceability.
-    eval_return : float or None
-        Evaluation return to include in the name.  ``None`` or ``NaN`` → ``"eval_na"``.
-    tag : str
-        Optional suffix such as ``"best"`` or ``"periodic"`` to distinguish
-        checkpoint types.
-
-    Returns
-    -------
-    str
-        Full filesystem path for the checkpoint directory.
-        The parent (daily) directory is guaranteed to exist after this call.
+    Returns:
+        Full filesystem path for checkpoint directory
     """
     now = datetime.now()
     day_folder = now.strftime("%d-%m-%Y")       # e.g. "10-03-2026"

@@ -1,85 +1,9 @@
 """
-dreamerv3_wrapper.py
+Single-agent Gymnasium wrapper for DreamerV3 with Box action space.
 
-Single-Agent Gymnasium Wrapper for DreamerV3 in the Game-of-Science Environment.
-
-Goals:
-1. Provide a Box action space compatible with RLlib's DreamerV3
-   (RLlib DreamerV3 only supports Discrete or Box, NOT MultiDiscrete)
-2. Match PPO wrapper observation encoding exactly for fair comparison
-3. Implement robust action mask repair (same logic as PPO)
-4. Support optional top-k collaboration ablation
-5. Ensure reproducible seeding and stable observation sizes
-
-Action Space Design:
-- Box(low=0, high=1, shape=(2 + CB,), dtype=float32)
-- Continuous values in [0, 1] are discretized during decoding:
-  - action[0]: choose_project_continuous -> discretize to [0, n_choose-1]
-  - action[1]: put_effort_continuous -> discretize to [0, n_effort-1]
-  - action[2:2+CB]: collaborate_with_continuous -> threshold at 0.5 for binary
-- Total dimension: 2 + CB (e.g., 42 for CB=40)
-- Much more efficient than 18,432 discrete actions
-
-Note on Action Space:
-The original design used MultiDiscrete, but RLlib's DreamerV3 ActorNetwork only accepts
-Discrete or Box action spaces. Box with discretization provides the same semantic meaning
-while being compatible with DreamerV3's continuous actor-critic architecture.
-
-Observation Space Design:
-- Flat Box vector matching PPO wrapper's flattened observation
-- Uses same running_projects slot encoding with activity flags, progress, urgency, etc.
-- Ensures stable size across episodes by padding/normalizing project slots
-
-Action Mask Debugging:
-This wrapper supports comprehensive action mask debugging to diagnose invalid actions,
-repair logic, and training issues. Enable with --debug-action-mask flag.
-
-Features:
-- Validates raw actions from actor before repair
-- Tracks which action heads are repaired (choose_project, put_effort, collaborate_with)
-- Validates final action after repair (warns if still invalid)
-- Logs to console and/or JSONL file
-- Configurable logging frequency and initial debug window
-
-CLI Flags:
-- --debug-action-mask: Enable debugging
-- --debug-action-mask-steps N: Debug first N steps (default: 50)
-- --debug-action-mask-interval N: Debug every N steps after initial window (default: 100)
-- --debug-action-mask-jsonl PATH: Write JSONL log to PATH
-
-JSONL Fields:
-- global_step: Total steps across all episodes
-- episode_step: Steps within current episode
-- agent_id: Controlled agent ID
-- raw_action: Action from actor before repair
-- action_mask: Environment-provided validity mask
-- raw_validation: Per-head validation results for raw action
-- repair_applied: Whether repair was needed
-- heads_repaired: List of repaired action heads
-- repaired_action: Action after repair
-- final_action: Action sent to env.step()
-- final_validation: Per-head validation results for final action
-- reward, terminated, truncated: Episode outcome
-- n_active_projects: Number of active projects for agent
-- n_available_projects: Number of available projects to choose from
-
-Usage:
-    python scripts/train_dreamerv3.py \\
-      --total-env-steps 5000 \\
-      --num-gpus 1 \\
-      --model-size XS \\
-      --debug-action-mask \\
-      --debug-action-mask-steps 100 \\
-      --debug-action-mask-interval 250 \\
-      --debug-action-mask-jsonl debug_action_mask.jsonl
-
-Analysis:
-    import pandas as pd
-    df = pd.read_json('debug_action_mask.jsonl', lines=True)
-    # Check invalid rates
-    print(df['raw_validation'].apply(lambda x: not x['all_valid']).mean())
-    # Check repair rates per head
-    print(df['heads_repaired'].explode().value_counts())
+Action Space: Box(0,1) with shape (2+CB) - continuous values discretized to actions
+Observation Space: Flat Box vector matching PPO wrapper for fair comparison
+Features: Action mask repair, top-k collaboration, optional debug logging
 """
 
 from __future__ import annotations
@@ -101,8 +25,6 @@ from src.utils.dreamer.action_validator import DreamerActionValidator
 
 logger = logging.getLogger(__name__)
 
-# Suppress Gymnasium dtype warnings - we handle dtype conversion correctly
-# These warnings appear during RLlib's initial env validation but our code is correct
 warnings.filterwarnings("ignore", message=".*precision lowered by casting to float32.*")
 warnings.filterwarnings("ignore", message=".*expecting numpy array dtype to be float32.*")
 warnings.filterwarnings("ignore", message=".*is not within the observation space.*")
@@ -112,12 +34,7 @@ ActionDict = Dict[str, Any]
 
 
 class DreamerV3SingleAgentWrapper(gym.Env):
-    """
-    Single-agent wrapper for DreamerV3 around PeerGroupEnvironment.
-
-    Converts complex Dict action space to MultiDiscrete for DreamerV3 compatibility.
-    Matches PPO wrapper's observation encoding for fair comparison.
-    """
+    """Single-agent wrapper for DreamerV3 with Box action space."""
 
     metadata = {"render.modes": ["human"]}
 
@@ -147,34 +64,22 @@ class DreamerV3SingleAgentWrapper(gym.Env):
     ):
         """
         Args:
-            env: PeerGroupEnvironment (PettingZoo ParallelEnv)
-            controlled_agent: Agent ID to control (default "agent_0")
-            other_policies: Dict mapping agent_id -> policy function for non-controlled agents
-            max_peer_group_size: Maximum number of peers (for collaborate_with). If None, uses env.max_peer_group_size
-            topk_collab: If set, enforce top-k collaboration constraint (like PPO wrapper)
-            topk_mode: Scoring mode for top-k ("score" uses reputation+distance+same-group)
-            topk_seed: Seed for deterministic tie-breaking in top-k
-            w_rep / w_dist / w_same: Weights for collaboration scoring
-            debug_effort: Enable debug logging for effort allocation
-            use_light_policy_obs: If True, use lightweight observations for non-controlled agents (performance optimization)
-            env_config: Optional RLlib env_config
-            debug_action_mask: Enable action mask debugging
-            debug_action_mask_steps: Number of initial steps to always debug
-            debug_action_mask_interval: Debug every N steps after initial period
-            debug_action_mask_jsonl: Path to JSONL log file for action mask debugging
-            invalid_action_penalty: Reward penalty per invalid action head (e.g., 0.1 means -0.1 per invalid head)
-            action_space_type: "box" or "discrete"
+            env: PeerGroupEnvironment
+            controlled_agent: Agent ID to control
+            other_policies: Policy functions for non-controlled agents
+            topk_collab: Max collaboration partners (None = unlimited)
+            w_rep/w_dist/w_same: Collaboration scoring weights
+            debug_action_mask: Enable action debugging
+            invalid_action_penalty: Penalty per invalid action head
         """
         super().__init__()
         self.env = env
         self.controlled_agent = controlled_agent
         self.other_policies = other_policies or {}
-        # Use environment's max_peer_group_size if not explicitly provided
         self.max_peer_group_size = max_peer_group_size if max_peer_group_size is not None else env.max_peer_group_size
         self.debug_effort = debug_effort
         self.debug_actions = bool(debug_actions)
 
-        # Action mask debugging configuration
         self.debug_action_mask = bool(env_config.get("debug_action_mask", debug_action_mask))
         self.debug_actions = bool(env_config.get("debug_actions", self.debug_actions))
         self.debug_action_mask_steps = int(env_config.get("debug_action_mask_steps", debug_action_mask_steps))
@@ -182,24 +87,17 @@ class DreamerV3SingleAgentWrapper(gym.Env):
         self.debug_action_mask_jsonl = debug_action_mask_jsonl
         self._debug_step_counter = 0
         self._debug_jsonl_file = None
-
-        # Invalid action penalty
         self.invalid_action_penalty = float(invalid_action_penalty)
 
-        # Open JSONL file if path provided
         if self.debug_action_mask and self.debug_action_mask_jsonl:
             log_path = Path(self.debug_action_mask_jsonl)
-            # Append worker and vector index to filename to avoid collisions
             unique_filename = f"{log_path.stem}_worker{self.worker_index}_vec{self.vector_index}{log_path.suffix}"
             unique_path = log_path.parent / unique_filename
             self._debug_jsonl_file = open(unique_path, 'w', encoding='utf-8')
             logger.info(f"Action mask debug logging to: {unique_path}")
 
-        # Light observation optimization (same as PPO wrapper)
         if use_light_policy_obs:
             self.env.use_light_policy_obs = True
-
-        # Top-k collaboration config (for fair comparison with PPO)
         self.topk_collab = topk_collab
         self.topk_mode = topk_mode
         self.topk_seed = int(topk_seed)
@@ -207,16 +105,12 @@ class DreamerV3SingleAgentWrapper(gym.Env):
         self.w_dist = float(w_dist)
         self.w_same = float(w_same)
 
-        # Seeding
         env_config = env_config or {}
-        # Support RLlib EnvContext which has worker_index and vector_index attributes
         self.worker_index = getattr(env_config, "worker_index", int(env_config.get("worker_index", 0)))
         self.vector_index = getattr(env_config, "vector_index", int(env_config.get("vector_index", 0)))
         self.base_seed = int(env_config.get("base_seed", 0))
 
         self._episode_counter = 0
-
-        # Episode-level metrics
         self._episode_step = 0
         self._episode_env_reward_sum = 0.0
         self._episode_training_reward_sum = 0.0
@@ -238,21 +132,16 @@ class DreamerV3SingleAgentWrapper(gym.Env):
         self._episode_put_effort_nonzero_count = 0
         self._episode_collab_count_sum = 0
         self._episode_collab_count_max = 0
-
-        # RL Agent specific stats
         self._episode_started_projects = 0
         self._episode_steps_until_first_reward = None
         self._episode_reward_nonzero_count = 0
         self._rl_agent_rewardless_steps = 0
         self._rl_agent_age = 0
         self._rl_agent_removed = False
-
-        # Effort specific episode metrics
         self._episode_effort_total_count = 0
         self._episode_effort_valid_count = 0
         self._episode_effort_invalid_count = 0
 
-        # Counters for action repair and top-k pruning
         self._repaired_actions = 0
         self._topk_calls = 0
         self._topk_pruned = 0
@@ -261,8 +150,6 @@ class DreamerV3SingleAgentWrapper(gym.Env):
         self._last_observations: Dict[str, Any] = {}
         self._last_actions: Dict[str, Any] = {}
         self._last_obs_stats: Dict[str, Any] = {}
-
-        # Initialize Action Handler
         self._action_handler = DreamerActionHandler(
             n_projects_per_step=self.env.n_projects_per_step,
             max_projects_per_agent=self.env.max_projects_per_agent,
@@ -273,8 +160,6 @@ class DreamerV3SingleAgentWrapper(gym.Env):
         self._CP = self._action_handler.CP
         self._PE = self._action_handler.PE
         self._CB = self._action_handler.CB
-
-        # Initialize Action Validator
         self._action_validator = DreamerActionValidator(
             max_peer_group_size=self.max_peer_group_size,
             n_projects_per_step=self.env.n_projects_per_step,
@@ -287,18 +172,12 @@ class DreamerV3SingleAgentWrapper(gym.Env):
             w_same=w_same,
             debug_steps=debug_action_mask_steps,
         )
-
-        # Initialize Observation Handler
         self._obs_handler = DreamerObservationHandler(
             env=self.env,
             max_projects_per_agent=self.env.max_projects_per_agent,
             max_peer_group_size=self.max_peer_group_size
         )
-
-        # Reference agent for building observation template
         self._ref_agent = self.controlled_agent
-
-        # Build observation space template (same logic as PPO wrapper)
         obs_space = self.env.observation_space(self._ref_agent)
         raw_obs_template = self._obs_handler.zeros_from_space(obs_space)
         self._mask_template = {
@@ -306,24 +185,16 @@ class DreamerV3SingleAgentWrapper(gym.Env):
             "collaborate_with": np.zeros(self._CB, dtype=np.int8),
             "put_effort": np.zeros(self._PE, dtype=np.int8),
         }
-
-        # Normalize observation template to ensure all project slots are present
         self._obs_template = self._obs_handler.create_normalized_obs_template(raw_obs_template)
         self._obs_handler.set_templates(self._obs_template, self._mask_template)
-
-        # Store templates locally as well for backwards compatibility
         self._obs_template_local = self._obs_template
         self._mask_template_local = self._mask_template
-
-        # Create sample flattened vector
         nested_template = {
             "observation": self._obs_template,
             "action_mask": self._mask_template,
             "_is_template": True
         }
         sample_vec = self._obs_handler.flatten_to_vector(nested_template)
-
-        # Set observation space (use float32 arrays to avoid dtype warnings)
         obs_dim = int(sample_vec.size)
         self.observation_space = Box(
             low=np.full(obs_dim, -np.inf, dtype=np.float32),
@@ -904,8 +775,6 @@ class DreamerV3SingleAgentWrapper(gym.Env):
         self._episode_put_effort_nonzero_count = 0
         self._episode_collab_count_sum = 0
         self._episode_collab_count_max = 0
-
-        # RL Agent specific stats
         self._episode_started_projects = 0
         self._episode_steps_until_first_reward = None
         self._episode_reward_nonzero_count = 0

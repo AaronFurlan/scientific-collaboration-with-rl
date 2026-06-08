@@ -10,23 +10,8 @@ import pyarrow.parquet as pq
 
 
 def extract_seed(path: Path) -> int | None:
-    """
-    Extract seed number from run folder name.
-
-    Patterns supported:
-    - rl_ppo_by_effort_s501_...
-    - rl_ppo_multiply_s502_...
-
-    Args:
-        path: Path to the run folder or file
-
-    Returns:
-        Seed as integer, or None if not found
-    """
-    # Look in the parent folder name (run_id)
+    """Extract seed number from run folder name (e.g., s501)."""
     folder_name = path.parent.name if path.is_file() else path.name
-
-    # Pattern: s followed by digits
     match = re.search(r's(\d+)', folder_name)
     if match:
         return int(match.group(1))
@@ -34,17 +19,7 @@ def extract_seed(path: Path) -> int | None:
 
 
 def extract_timestamp(run_id: str) -> str | None:
-    """
-    Extract timestamp from run folder name.
-
-    Pattern: YYYYMMDD_HHMMSS
-
-    Args:
-        run_id: Run folder name
-
-    Returns:
-        Timestamp string or None if not found
-    """
+    """Extract timestamp from run folder name (YYYYMMDD_HHMMSS)."""
     match = re.search(r'(\d{8}_\d{6})', run_id)
     if match:
         return match.group(1)
@@ -52,12 +27,7 @@ def extract_timestamp(run_id: str) -> str | None:
 
 
 def load_json_records(path: Path) -> list[dict]:
-    """
-    Load JSON records from a file.
-
-    Supports:
-    - Normal JSON array: [{"a": 1}, {"b": 2}]
-    - JSON object with list: {"actions": [...]} or {"observations": [...]}
+    """Load JSON records from file (supports array or object with list).
     - JSONL fallback: one JSON object per line
 
     Args:
@@ -106,44 +76,70 @@ def load_json_records(path: Path) -> list[dict]:
         return []
 
 
-def normalize_records(records: list[dict], metadata: dict) -> pd.DataFrame:
+def normalize_records(records: list[dict], metadata: dict, controlled_agent: str = 'agent_0') -> pd.DataFrame:
     """
-    Normalize records into a DataFrame with metadata columns.
+    Extract controlled agent data from records.
+
+    Converts agent-keyed dictionaries, extracting only the controlled agent:
+    {step: 0, agent_0: {...}, agent_1: {...}}
+    → [(step=0, agent_id=agent_0, data={...})]
 
     Args:
         records: List of record dictionaries
         metadata: Dict with run_id, seed, source_file, source_type
+        controlled_agent: Agent ID to extract (default: 'agent_0')
 
     Returns:
-        DataFrame with flattened records and metadata
+        DataFrame with controlled agent data only
     """
     if not records:
         return pd.DataFrame()
 
-    # Try to normalize nested structures
-    try:
-        df = pd.json_normalize(records, max_level=2)
-    except Exception:
-        # If normalization fails, convert to DataFrame directly
-        df = pd.DataFrame(records)
+    rows = []
 
-    # Convert columns with complex objects to JSON strings
-    for col in df.columns:
-        if df[col].dtype == 'object':
-            # Check if any value is dict or list
-            sample = df[col].dropna().head(1)
-            if len(sample) > 0:
-                val = sample.iloc[0]
-                if isinstance(val, (dict, list)):
-                    df[col] = df[col].apply(
-                        lambda x: json.dumps(x) if isinstance(x, (dict, list)) else x
-                    )
+    for record in records:
+        if not isinstance(record, dict):
+            continue
 
-    # Add metadata columns
-    for key, value in metadata.items():
-        df[key] = value
+        # Extract step/timestep if present
+        step = record.get('step', record.get('timestep', None))
 
-    return df
+        # Check if controlled agent exists in this record
+        if controlled_agent in record:
+            agent_data = record[controlled_agent]
+
+            # Skip if agent is inactive (None)
+            if agent_data is None:
+                continue
+
+            row = {
+                'agent_id': controlled_agent,
+                'step': step,
+            }
+
+            # Add agent-specific data
+            if isinstance(agent_data, dict):
+                # Flatten nested dicts with limited depth
+                for key, val in agent_data.items():
+                    if isinstance(val, (dict, list)):
+                        # Store complex objects as JSON strings
+                        row[key] = json.dumps(val)
+                    else:
+                        row[key] = val
+            else:
+                # Scalar value (shouldn't happen, but handle it)
+                row['data'] = agent_data
+
+            # Add metadata
+            for key, value in metadata.items():
+                row[key] = value
+
+            rows.append(row)
+
+    if not rows:
+        return pd.DataFrame()
+
+    return pd.DataFrame(rows)
 
 
 def aggregate_files(
@@ -151,10 +147,13 @@ def aggregate_files(
     pattern: str,
     source_type: str,
     seed_start: int,
-    seed_end: int
-) -> pd.DataFrame:
+    seed_end: int,
+    output_file: Path,
+    batch_size: int = 10
+) -> dict:
     """
     Aggregate all files matching pattern within seed range.
+    Memory-efficient version that writes directly to parquet in batches.
 
     Args:
         input_dir: Directory to search
@@ -162,20 +161,23 @@ def aggregate_files(
         source_type: "actions" or "observations"
         seed_start: Minimum seed (inclusive)
         seed_end: Maximum seed (inclusive)
+        output_file: Path to output parquet file
+        batch_size: Number of files to process before writing to disk (default: 10)
 
     Returns:
-        Aggregated DataFrame
+        Dictionary with statistics
     """
-    all_dfs = []
+    from tqdm import tqdm
+
     found_files = []
     skipped_files = []
 
-    # Recursively find all matching files
+    # First pass: collect all file paths
+    print(f"\nScanning for {source_type} files...")
+    all_file_paths = []
     for file_path in input_dir.rglob(pattern):
-        # Extract seed
         seed = extract_seed(file_path)
 
-        # Filter by seed range
         if seed is None:
             skipped_files.append((str(file_path), "No seed found"))
             continue
@@ -184,73 +186,103 @@ def aggregate_files(
             skipped_files.append((str(file_path), f"Seed {seed} out of range"))
             continue
 
-        # Extract run metadata
-        run_id = file_path.parent.name
-        timestamp = extract_timestamp(run_id)
+        all_file_paths.append((file_path, seed))
 
-        # Load records
-        records = load_json_records(file_path)
+    print(f"  Found {len(all_file_paths)} files to process")
 
-        if not records:
-            skipped_files.append((str(file_path), "No records loaded"))
+    if not all_file_paths:
+        return {'found': 0, 'skipped': len(skipped_files), 'total_rows': 0}
+
+    # Process files in batches
+    writer = None
+    schema = None
+    total_rows = 0
+    batch_dfs = []
+
+    for idx, (file_path, seed) in enumerate(tqdm(all_file_paths, desc=f"Processing {source_type}")):
+        try:
+            # Extract run metadata
+            run_id = file_path.parent.name
+            timestamp = extract_timestamp(run_id)
+
+            # Load records
+            records = load_json_records(file_path)
+
+            if not records:
+                skipped_files.append((str(file_path), "No records loaded"))
+                continue
+
+            # Prepare metadata
+            metadata = {
+                'run_id': run_id,
+                'seed': seed,
+                'source_file': str(file_path.relative_to(input_dir)),
+                'source_type': source_type,
+            }
+
+            if timestamp:
+                metadata['timestamp'] = timestamp
+
+            # Normalize
+            df = normalize_records(records, metadata)
+
+            if not df.empty:
+                batch_dfs.append(df)
+                found_files.append((str(file_path), seed, len(df)))
+                total_rows += len(df)
+
+                # Write batch to disk when batch is full or at the end
+                if len(batch_dfs) >= batch_size or idx == len(all_file_paths) - 1:
+                    batch_combined = pd.concat(batch_dfs, ignore_index=True)
+
+                    # Convert to PyArrow table
+                    table = pa.Table.from_pandas(batch_combined)
+
+                    # Initialize writer on first batch
+                    if writer is None:
+                        schema = table.schema
+                        writer = pq.ParquetWriter(output_file, schema)
+
+                    # Write batch
+                    writer.write_table(table)
+
+                    # Clear batch from memory
+                    batch_dfs.clear()
+                    del batch_combined
+                    del table
+
+        except Exception as e:
+            skipped_files.append((str(file_path), f"Error: {e}"))
             continue
 
-        # Prepare metadata
-        metadata = {
-            'run_id': run_id,
-            'seed': seed,
-            'source_file': str(file_path.relative_to(input_dir)),
-            'source_type': source_type,
-        }
+    # Close writer
+    if writer is not None:
+        writer.close()
 
-        if timestamp:
-            metadata['timestamp'] = timestamp
-
-        # Normalize and add to collection
-        df = normalize_records(records, metadata)
-
-        if not df.empty:
-            all_dfs.append(df)
-            found_files.append((str(file_path), seed, len(df)))
-
-    # Print summary for this source type
-    print(f"\n{source_type.capitalize()} files:")
-    print(f"  Found: {len(found_files)}")
+    # Print summary
+    print(f"\n{source_type.capitalize()} summary:")
+    print(f"  Processed: {len(found_files)} files")
     if found_files:
         seeds_included = sorted(set(seed for _, seed, _ in found_files))
-        print(f"  Seeds: {seeds_included}")
-        total_rows = sum(rows for _, _, rows in found_files)
+        print(f"  Seeds: {len(seeds_included)} unique ({min(seeds_included)} - {max(seeds_included)})")
         print(f"  Total rows: {total_rows:,}")
 
     if skipped_files:
-        print(f"  Skipped: {len(skipped_files)}")
-        for path, reason in skipped_files[:5]:  # Show first 5
-            print(f"    - {Path(path).name}: {reason}")
-        if len(skipped_files) > 5:
-            print(f"    ... and {len(skipped_files) - 5} more")
+        print(f"  Skipped: {len(skipped_files)} files")
+        if len(skipped_files) <= 5:
+            for path, reason in skipped_files:
+                print(f"    - {Path(path).name}: {reason}")
+        else:
+            for path, reason in skipped_files[:3]:
+                print(f"    - {Path(path).name}: {reason}")
+            print(f"    ... and {len(skipped_files) - 3} more")
 
-    # Combine all DataFrames
-    if not all_dfs:
-        return pd.DataFrame()
-
-    combined = pd.concat(all_dfs, ignore_index=True)
-
-    # Sort by relevant columns
-    sort_cols = ['seed', 'run_id']
-
-    # Add step-like columns if available
-    for step_col in ['step', 'timestep', 'env_step', 'episode']:
-        if step_col in combined.columns:
-            sort_cols.append(step_col)
-            break
-
-    # Add agent_id if available
-    if 'agent_id' in combined.columns:
-        sort_cols.append('agent_id')
-
-    combined = combined.sort_values(by=sort_cols, ignore_index=True)
-
-    return combined
+    return {
+        'found': len(found_files),
+        'skipped': len(skipped_files),
+        'total_rows': total_rows,
+        'seeds': len(set(seed for _, seed, _ in found_files)),
+    }
 
 
 def main():
@@ -297,51 +329,60 @@ def main():
     # Create output directory
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    print(f"Aggregating RL evaluation files")
+    print(f"Aggregating RL evaluation files (Memory-efficient mode)")
     print(f"  Input: {input_dir}")
     print(f"  Output: {output_dir}")
     print(f"  Seed range: {args.seed_start} - {args.seed_end}")
 
+    # Define output files
+    actions_file = output_dir / 'actions_all_seeds.parquet'
+    obs_file = output_dir / 'observations_all_seeds.parquet'
+
     # Aggregate actions (support both .json and .jsonl)
-    actions_df = aggregate_files(
+    # Writes directly to parquet file in batches
+    actions_stats = aggregate_files(
         input_dir=input_dir,
         pattern='*_actions.json*',
         source_type='actions',
         seed_start=args.seed_start,
-        seed_end=args.seed_end
+        seed_end=args.seed_end,
+        output_file=actions_file,
+        batch_size=10  # Process 10 files at a time
     )
 
     # Aggregate observations (support both .json and .jsonl)
-    observations_df = aggregate_files(
+    obs_stats = aggregate_files(
         input_dir=input_dir,
         pattern='*_observations.json*',
         source_type='observations',
         seed_start=args.seed_start,
-        seed_end=args.seed_end
+        seed_end=args.seed_end,
+        output_file=obs_file,
+        batch_size=10  # Process 10 files at a time
     )
 
-    # Write output files
-    print("\nWriting output files:")
+    # Print final summary
+    print("\n" + "="*60)
+    print("AGGREGATION COMPLETE")
+    print("="*60)
 
-    if not actions_df.empty:
-        actions_file = output_dir / f'actions_{args.seed_start}_{args.seed_end}.parquet'
-        actions_df.to_parquet(actions_file, index=False)
-        print(f"  ✓ {actions_file}")
-        print(f"    Rows: {len(actions_df):,}")
-        print(f"    Columns: {len(actions_df.columns)}")
+    if actions_stats['found'] > 0:
+        print(f"\n✓ Actions: {actions_file}")
+        print(f"    Files processed: {actions_stats['found']}")
+        print(f"    Total rows: {actions_stats['total_rows']:,}")
+        print(f"    Unique seeds: {actions_stats['seeds']}")
     else:
-        print("  ⚠ No actions data to write")
+        print("\n⚠ No actions data written")
 
-    if not observations_df.empty:
-        obs_file = output_dir / f'observations_{args.seed_start}_{args.seed_end}.parquet'
-        observations_df.to_parquet(obs_file, index=False)
-        print(f"  ✓ {obs_file}")
-        print(f"    Rows: {len(observations_df):,}")
-        print(f"    Columns: {len(observations_df.columns)}")
+    if obs_stats['found'] > 0:
+        print(f"\n✓ Observations: {obs_file}")
+        print(f"    Files processed: {obs_stats['found']}")
+        print(f"    Total rows: {obs_stats['total_rows']:,}")
+        print(f"    Unique seeds: {obs_stats['seeds']}")
     else:
-        print("  ⚠ No observations data to write")
+        print("\n⚠ No observations data written")
 
-    print("\nAggregation complete!")
+    print("\n" + "="*60)
 
 
 if __name__ == '__main__':

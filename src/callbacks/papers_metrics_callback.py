@@ -1,19 +1,6 @@
 """
-papers_metrics_callback.py
-
-RLlib new-API-stack compatible callback that aggregates paper & effort
-diagnostics from the env info dict into custom_metrics / metrics_logger.
-
-These metrics are visible in result["custom_metrics"] and therefore in W&B.
-
-Designed to work in multi-worker setups without print-spam:
-- Accumulates per-step counters in episode.user_data.
-- Writes aggregated values on episode_end.
-- No prints (unless PAPERS_CALLBACK_DEBUG env var is set).
-
-Compatible with:
-  - RLlib new stack (SingleAgentEpisode, metrics_logger)
-  - RLlib old stack (episode.custom_metrics, episode.user_data)
+RLlib callback aggregating paper & effort diagnostics into custom_metrics.
+Compatible with RLlib new/old API stack.
 """
 
 from __future__ import annotations
@@ -24,25 +11,16 @@ from typing import Any, Dict, Optional
 import numpy as np
 from ray.rllib.algorithms.callbacks import DefaultCallbacks
 
-# Debug flag: set PAPERS_CALLBACK_DEBUG=1 env var to enable per-episode prints
 _DEBUG = os.environ.get("PAPERS_CALLBACK_DEBUG", "0") == "1"
 
 
 class PapersMetricsCallback(DefaultCallbacks):
-    """Aggregate paper_stats and debug_effort from env info into custom metrics.
-
-    Uses an internal dict keyed by episode.id_ because SingleAgentEpisode
-    (new API stack) uses __slots__ and has no user_data attribute.
-    """
+    """Aggregates paper_stats and effort diagnostics from env info."""
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        # episode.id_ -> accumulator dict.  Cleaned up in on_episode_end.
         self._ep_data: Dict[str, dict] = {}
 
-    # ------------------------------------------------------------------
-    # Episode start: initialise accumulators
-    # ------------------------------------------------------------------
     def on_episode_start(
         self,
         *,
@@ -59,17 +37,14 @@ class PapersMetricsCallback(DefaultCallbacks):
     ):
         eid = self._episode_id(episode)
         self._ep_data[eid] = {
-            # Paper stats accumulators (per-step lists for mean/last)
             "_ps_total": [],
             "_ps_active": [],
             "_ps_due": [],
             "_ps_published": [],
             "_ps_rejected": [],
-            # Effort diagnostics accumulators
             "_eff_applied": [],
             "_choose_effective": [],
             "_n_active_agent": [],
-            # New effort/decision quality metrics
             "_effort_total": 0,
             "_effort_invalid": 0,
             "_effort_valid": 0,

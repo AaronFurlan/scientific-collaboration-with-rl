@@ -1,0 +1,1469 @@
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%
+% (c) Lucerne University of Applied Sciences and Arts
+%
+% HSLU-I: Official Thesis Template
+%
+% This template complies with the official thesis guidelines released
+% on complesis by the department HSLU-I (computer science).
+% It supports the languages english and german. The language and thesis style
+% can be set by the parameters passed to the documentclass on line 33.
+%
+% NOTE: The class and style sheets (hsluthesis.cls, hsluthesisterms.sty) should
+%       NOT be changed. These are configuration files and define the document style.
+%
+% Original guidelines can be found on complesis:
+% https://complesis.hslu.ch/
+%
+% Original author:
+%   Ramón Christen HSLU-I
+%
+% Versions:
+%   v1.0    21-03-2025: Initial Version
+%   v2.0    22-09-2025: Reviewed template structure (.cls added); Extension for continuous education
+%   v2.1    29-09-2025: Extended for WIPRO
+%   v2.2    10-10-2025: Minor corrections for WIPRO
+%
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+
+%----------------------------------------------------------------------------------------
+%	PACKAGES AND DOCUMENT CONFIGURATIONS
+%----------------------------------------------------------------------------------------
+% class options (set in \documentclass[...]; order of options is irrelevant):
+%   degree:       [wipro, bachelor, master, cas, sas]
+%   language:     [english, german]
+%   groupwork:    [groupwork] (extends declaration for two students)
+%   ip:           [noip] (only for cas/sas if no intellectual property consent is required)
+%
+% Examples for configuring the documentclass:
+% \documentclass[german,master]{hsluthesis}
+% \documentclass[english,bachelor]{hsluthesis}
+% \documentclass[german,wipro,groupwork]{hsluthesis}
+% \documentclass[english,cas,noip]{hsluthesis}
+\documentclass[english,bachelor]{hsluthesis}
+
+\usepackage[T1]{fontenc}
+\usepackage{newtxtext}
+\usepackage{newtxmath}
+
+
+\usepackage{comment}                            % having comment sections \begin{comment} \end{comment}
+\usepackage{amsmath}							% math package
+\usepackage{amsfonts}							% font package for math symbols
+\usepackage{amssymb}							% symbols package - definition of math symbols
+\usepackage{listings}							% package for code representation
+\usepackage{graphicx}							% for inclusion of image
+\usepackage{subfig}								% to arrange figures next to each other
+\usepackage{float}								% text style surrounding images
+\usepackage[acronym]{glossaries}         		% package for glossary
+\usepackage{tikz}								% used to place logos on title page
+% \usepackage{gensymb}							% for special characters such as °
+\usepackage[a-1a]{pdfx}                         % Forces PDF/A-1a compliance for long-term archiving
+
+
+\usepackage{multirow}
+\usepackage{siunitx}
+\usepackage{tabularx}
+\usepackage{tikzscale}
+
+
+\hypersetup{hidelinks}                          % hide red border in hyperlinks
+\setcounter{tocdepth}{1}                        % hide subsections from TOC
+\makenoidxglossaries
+\input{acronyms}                                % include acronyms.txt file
+\input{glossary}                                % include glossary.txt file
+\graphicspath{{figs/}}						    % set path of graphics folder
+
+
+%----------------------------------------------------------------------------------------
+%	PDF/A DOCUMENT COMPLIANCE
+%----------------------------------------------------------------------------------------
+\pdfcatalog{
+  /StructTreeRoot <<                            % Define the structure tree root for document tagging
+    /Type /StructTreeRoot                       % Specify that this is a structure tree root
+    /K []                                       % Placeholder for structure elements (empty for now)
+  >>
+  /MarkInfo << /Marked true >>                  % Ensure the document is marked as tagged for accessibility
+}
+
+
+\begin{document}
+%----------------------------------------------------------------------------------------
+%	DOCUMENT INFORMATION
+%----------------------------------------------------------------------------------------
+% \thesisLanguage{english}                                  % set thesis language [english,                                                                     german]
+\author{Aaron Furlan}                                       % author name
+\city{Lucerne (Switzerland)}                                % author's place of origin
+\title{Reinforcement Learning in the Game of Science}       % thesis title
+\subtitle{\large Optimize scientists as RL-agents}          % thesis subtitle
+
+\date{2026}                                     % the year when the thesis was written (used in titlepage)
+\defensedate{October 27th, 2025}                % the date of the private defense
+\defencelocation{Lucerne}                       % location of defence
+\extexpert{Expert Name}                         % name of external expert
+\indpartner{Company Name}                       % name of industry partner
+\studyprogram{Artificial Intelligence \& Machine Learning}                    % name of study program: Business Information Technology, International IT Management, ...
+
+% jury, supervisor and dean are only relevant if acceptance sheet is enabled with the next line
+% \addAcceptsheet
+\jury{                                          % members of the jury
+    \begin{itemize}
+        \item Prof. Dr. Name Surname from Lucerne University of Applied Sciences and Arts, Switzerland (President of the Jury);
+        \item Prof. Dr. Name Surname from Lucerne University of Applied Sciences and Arts, Switzerland (Thesis Supervisor);
+        \item Prof. Dr. Name Surname from Lucerne University of Applied Sciences and Arts, Switzerland (External Expert).
+    \end{itemize}
+}
+
+\supervisor{Prof. Dr. Name Surname}             % name of supervisor
+\dean{Prof. Dr. Name Surname}                   % name of faculty dean
+
+\acknowledgments{Thanks to my family, relatives and friends for all the support given to finish this thesis.}
+
+
+
+%----------------------------------------------------------------------------------------
+%	BEGIN DOCUMENT AND CREATE TITLEPAGE
+%----------------------------------------------------------------------------------------
+\maketitle
+
+
+%----------------------------------------------------------------------------------------
+%	PREAMBLE
+%----------------------------------------------------------------------------------------
+\begin{abstractstyle}{\hsummary}
+    The content of your thesis in brief.
+\end{abstractstyle}
+
+\tableofcontents
+\listoffigures
+\listoftables
+% print list of acronyms and glossary
+\printnoidxglossaries
+
+
+
+%----------------------------------------------------------------------------------------
+%	MAIN CONTENT
+%----------------------------------------------------------------------------------------
+\mainmatter
+
+%----------------------------------------------------------------------------------------
+% KAPITEL 1: PROBLEM, FRAGESTELLUNG, VISION
+%----------------------------------------------------------------------------------------
+\chapter{Problem Statement, Research Question, and Vision}
+
+\section{Background and Context}
+The Game of Science is an agent-based simulation of scientific knowledge production designed to study how incentive structures influence researcher behavior. It models science as a stochastic, cooperative task-completion process in which agents represent researcher who form collaborations, initiate projects and allocate effort.
+The simulation was introduced by Christof Bless and calibrated using real-world data to reflect empirical properties of scientific work \cite{bless_game_of_science_2026}.
+
+A central aspect of the environment is the interplay between cooperation and competition: agents must coordinate with peers to successfully complete projects, while simultaneously competing for reputation, which acts as the primary reward signal. Project outcomes depend on multiple factors, including effort, novelty, and stochastic acceptance processes, resulting in delayed and noisy rewards \cite{bless_game_of_science_2026}.
+
+The environment is formulated as a reinforcement learning setting, enabling the study of adaptive decision-making in a complex multi-agent system. From the perspective of an individual learning agent, the problem is characterized by delayed credit assignment, partial observability and strong dependencies on the behavior of other (non-learning) agents.
+
+This work investigates \gls{rl} in this challenging setting by training agents under different algorithmic approaches and analyzing the resulting policies. Rather than focusing solely on performance, the objective is to understand which behavioral strategies emerge and how structural properties of the environment influence learning dynamics and decision-making.
+
+\section{Problem Statement}
+Reinforcement learning has demonstrated strong performance in a wide range of domains, particularly in environments with well-defined reward signals and controllable dynamics. However, its effectiveness is significantly reduced in settings where rewards are delayed, noisy, and dependent on interactions with other agents.
+
+The Game of Science environment introduces several such challenges. Rewards are only obtained upon project completion, often many timesteps after the corresponding actions were taken. Furthermore, outcomes depend not only on the agent's own decisions, but also on the behavior of other agents, whose policies are fixed and not controllable. This results in a complex credit assignment problem, where it becomes difficult to attribute outcomes to specific actions.
+
+Additionally, stochastic elements in project success and dynamically changing collaboration structures further obscure the relationship between actions and rewards. From the perspective of the learning agent, this leads to weak and noisy learning signals, making policy optimization difficult and potentially unstable.
+
+As a result, it remains unclear to what extent standard reinforcement learning algorithms can learn meaningful strategies in such an environment, and how the structural properties of the system influence the learned behavior.
+
+\section{Research Questions}
+Based on the problem outlined above, this work is guided by the following research questions. These questions focus on the learnability of the environment, the comparison of different reinforcement learning approaches, and the analysis of the resulting agent behavior.
+\resq{1}{To what extent can reinforcement learning agents learn effective policies in a stochastic multi-agent environment with delayed and noisy rewards?}
+\resq{2}{How do the algorithms PPO,\gls{appo} and DreamerV3 compare in terms of learning performance, stability, and emergent strategies in the Game of Science environment?}
+\resq{3}{What behavioral strategies emerge from trained reinforcement learning agents, and how do they differ from predefined policy archetypes?}
+
+\section{Vision and Relevance}
+The objective of this work is to investigate reinforcement learning in the Game of Science environment by training and evaluating learning agents under different algorithmic approaches. In particular, this work aims to implement a complete reinforcement learning pipeline, compare different algorithms, and analyze the resulting agent behavior.
+
+The focus is not solely on achieving high performance, but on understanding how learning dynamics and environmental properties influence the learned strategies.
+The scope of this work is limited to a single learning agent interacting with multiple fixed-policy agents. Multi-agent learning with multiple adaptive agents is not considered. Furthermore, the evaluation focuses on relative performance and behavioral analysis rather than absolute optimality.
+
+This work is not only relevant for scientific collaboration. The Game of Science environment includes challenges that also appear in many real-world multi-agent systems. These include delayed rewards, uncertain outcomes, and the fact that a single agent has only limited control over the final result.
+
+Because of this, the results may also be useful for other domains where several agents interact, make decisions, and depend on each other's behavior. Examples include organizational behavior, distributed resource allocation, and social simulation.
+
+\section{Objectives and Contributions}
+This work makes the following contributions:
+\begin{itemize}
+    \item Implementation of a complete end-to-end reinforcement learning pipeline for the Game of Science environment, including training, evaluation, and logging.
+    \item Empirical comparison of three different algorithms in a complex multi-agent setting.
+    \item Systematic evaluation across multiple random seeds to ensure statistically meaningful results.
+    \item Analysis of emergent agent behavior and comparison to predefined policy archetypes.
+\end{itemize}
+
+\section{Structure of the Thesis}
+This thesis is structured as follows. Chapter 2 presents the state of research and practice in reinforcement learning and multi-agent environments. Chapter 3 develops the conceptual ideas underlying the experimental approach. Chapter 4 describes the methodology, including algorithmic choices and experimental design. Chapter 5 documents the implementation and realization of the reinforcement learning pipeline. Chapter 6 presents validation and evaluation results. Chapter 7 provides an outlook on future work and unresolved challenges. The appendices contain supplementary material including the signed task description, detailed hyperparameter tables, and additional experimental results.
+
+%----------------------------------------------------------------------------------------
+% KAPITEL 2: Background and State of Research
+%----------------------------------------------------------------------------------------
+\chapter{Background and State of Research}
+
+\section{Reinforcement Learning Foundations}
+This section introduces the basic reinforcement learning concepts needed for this work. It focuses on how agents interact with an environment, how rewards define the learning objective, and why delayed feedback makes learning difficult in the Game of Science environment.
+
+\subsection{Markov Decision Processes}
+A \gls{mdp} provides the standard formal framework for reinforcement learning \cite{sutton2018reinforcement}. An MDP is defined as a tuple $(\mathcal{S}, \mathcal{A}, P, R, \gamma)$, where $\mathcal{S}$ denotes the state space, $\mathcal{A}$ the action space, $P$ the transition dynamics, $R$ the reward function, and $\gamma \in [0,1]$ the discount factor.
+
+A key assumption is the Markov property:
+
+\begin{equation}
+P(S_{t+1} \mid S_t, A_t) = P(S_{t+1} \mid S_0, \dots, S_t, A_t),
+\end{equation}
+
+meaning that the current state fully captures all relevant information for predicting future dynamics.
+
+In many real-world environments, including the Game of Science, this assumption is only approximately satisfied. Hidden variables, interactions between agents, and unobserved internal states introduce dependencies that are not captured by the observable state, effectively violating the Markov property from the perspective of the learning agent.
+
+\subsection{Partially Observable Markov Decision Processes}
+To account for incomplete observability, the MDP framework can be extended to a Partially Observable Markov Decision Process (POMDP). In a POMDP, the agent does not observe the true state $s_t$, but instead receives an observation $o_t$ generated by an observation function:
+
+\begin{equation}
+o_t \sim O(s_t)
+\end{equation}
+
+This leads to an information-limited decision process in which the agent must act under uncertainty about the true state of the environment.
+
+In the Game of Science environment, the learning agent only has access to a structured local observation that excludes important global information such as the full coalition structure, latent agent characteristics, and future actions of other agents. This induces state aliasing and increases the difficulty of learning an effective policy.
+
+\subsection{Return, Discounting, and Credit Assignment}
+
+The objective in reinforcement learning is to maximize the expected return:
+
+\begin{equation}
+G_t = \sum_{k=0}^{\infty} \gamma^k R_{t+k+1}
+\end{equation}
+
+The discount factor $\gamma$ controls how strongly future rewards are taken into account. A value close to zero makes the agent focus more on immediate rewards, while a value close to one gives more weight to long-term outcomes.
+
+A key difficulty in reinforcement learning is the \emph{credit assignment problem}. This describes the problem of identifying which earlier actions were responsible for a later reward. The problem becomes harder when rewards are delayed, because the effect of an action may only become visible many steps later.
+
+In the Game of Science environment, rewards are not simply sparse, but strongly delayed and influenced by several interacting factors. A project outcome depends on accumulated effort, the collaboration structure, and stochastic acceptance. This makes the learning signal weak and noisy. As a result, it is difficult for the agent to learn which specific actions actually contributed to later reputation gains.
+
+\section{Deep Reinforcement Learning}
+
+Policy gradient methods learn a policy directly. The policy is represented by a neural network with parameters $\theta$ and defines the probability of selecting an action $a$ in a state $s$:
+
+\[
+\pi_\theta(a \mid s)
+\]
+
+The goal is to adjust the parameters so that the expected return is maximized:
+
+\begin{equation}
+J(\theta) = \mathbb{E}_\pi[G_t]
+\end{equation}
+
+The Policy Gradient Theorem gives a practical way to compute the gradient of this objective:
+
+\begin{equation}
+\nabla J(\theta)
+\propto
+\mathbb{E}_{s \sim \mu^\pi, a \sim \pi_\theta}
+\left[
+q_\pi(s,a)\nabla_\theta \log \pi_\theta(a \mid s)
+\right]
+\end{equation}
+
+This allows the policy to be optimized with gradient-based methods without directly differentiating through the environment dynamics \cite{sutton2018reinforcement}.
+
+Policy gradient methods are useful for environments with large or structured action spaces, because they can learn stochastic policies directly. This is also helpful for exploration, since the agent does not always have to choose the same action in the same state. However, these methods depend strongly on the quality of the reward signal. If rewards are delayed or noisy, the estimated gradients can have high variance, which makes learning slower and less stable.
+
+\subsection{REINFORCE}
+
+REINFORCE is a basic Monte Carlo policy gradient algorithm \cite{sutton2018reinforcement}. It updates the policy using the full return observed after taking an action:
+
+\begin{equation}
+\theta_{t+1}
+=
+\theta_t
++
+\alpha
+G_t
+\nabla_\theta \log \pi_\theta(a_t \mid s_t)
+\end{equation}
+
+The advantage of REINFORCE is that the gradient estimate is unbiased. However, it often has very high variance, especially in long episodes. A baseline can reduce this variance, but the method still tends to be sample inefficient and unstable.
+
+For the Game of Science environment, REINFORCE is therefore not a practical choice. Rewards are delayed, stochastic, and depend on several later interactions. This makes the learning signal too noisy for a pure Monte Carlo policy gradient method.
+
+\subsection{Actor--Critic Methods}
+
+Actor--critic methods combine two components: an actor and a critic. The actor represents the policy and decides which actions to take. The critic estimates how good a state is and is used to guide the policy update.
+
+The critic is usually trained with temporal-difference (TD) learning. The TD error is defined as:
+
+\begin{equation}
+\delta_t = R_{t+1} + \gamma \hat{v}(S_{t+1}) - \hat{v}(S_t)
+\end{equation}
+
+This error measures the difference between the predicted value of the current state and a bootstrapped target based on the next state. It can be used as an estimate of the advantage for updating the actor.
+
+Compared to Monte Carlo methods such as REINFORCE, actor--critic methods usually have lower variance because they do not need to wait for the full return. Instead, they bootstrap from the critic's value estimate. This often makes learning more stable and sample efficient, although it introduces some bias.
+
+In the Game of Science environment, the critic still faces a hard problem. It has to estimate long-term outcomes that are delayed, stochastic, and influenced by the actions of other agents. If the critic learns inaccurate values, these errors can directly affect the policy update and make learning less reliable.
+
+\section{Proximal Policy Optimization}
+
+\gls{ppo} was introduced by Schulman et al.~\cite{schulman2017proximalpolicyoptimizationalgorithms} as a first-order policy gradient method that combines the stability of trust-region approaches with the simplicity of stochastic gradient optimization. Like the actor--critic methods described above, \gls{ppo} uses both a policy and a value function during training.
+
+\gls{ppo} addresses the instability of vanilla policy gradient methods, which may produce excessively large policy updates when optimizing repeatedly on the same batch of data. Instead of enforcing a hard KL-divergence constraint as in TRPO, \gls{ppo} uses a clipped surrogate objective. Let
+
+\begin{equation}
+r_t(\theta) =
+\frac{\pi_\theta(a_t|s_t)}{\pi_{\theta_{\text{old}}}(a_t|s_t)}
+\end{equation}
+
+denote the probability ratio between the updated and previous policy. The clipped objective is defined as
+
+\begin{equation}
+L^{CLIP}(\theta) =
+\hat{\mathbb{E}}_t \left[
+\min \left(
+r_t(\theta)\hat{A}_t,
+\text{clip}(r_t(\theta), 1-\epsilon, 1+\epsilon)\hat{A}_t
+\right)
+\right],
+\end{equation}
+
+where $\epsilon$ controls how far the new policy is allowed to move away from the old policy. The clipping mechanism limits destructive policy updates while still allowing efficient gradient-based optimization.
+
+In practice, \gls{ppo} allows multiple epochs of minibatch updates on collected trajectory data, which improves sample efficiency compared to simpler policy gradient methods. Empirical results show that \gls{ppo} outperforms vanilla policy gradient methods and A2C on Atari benchmarks and achieves strong performance on continuous control tasks \cite{schulman2017proximalpolicyoptimizationalgorithms}.
+
+Overall, \gls{ppo} provides a computationally efficient approximation to trust-region methods and is widely used because of its empirical stability.
+
+\section{Asynchronous Proximal Policy Optimization}
+
+\gls{appo} is an asynchronous variant of \gls{ppo} that combines PPO-style policy optimization with a distributed actor--learner architecture. In contrast to standard \gls{ppo}, where workers collect experience synchronously before policy updates are performed, \gls{appo} allows multiple workers to collect trajectories in parallel while the learner updates the policy. This can improve wall-clock efficiency, especially in larger or slower environments \cite{DBLP:journals/corr/abs-1912-00167}.
+
+The main trade-off is that collected trajectories may come from slightly older policy parameters. This creates a mismatch between the worker policy and the current learner policy. To reduce the resulting bias, \gls{appo} can use correction mechanisms such as importance weighting or V-trace-style corrections.
+
+Similar to \gls{ppo}, \gls{appo} uses a probability ratio between the current policy and the policy that generated the sampled action. In an asynchronous setting, this ratio can be written as
+
+\begin{equation}
+r_t(\theta) =
+\frac{\pi_\theta(a_t|s_t)}
+{\pi_{\text{worker}}(a_t|s_t)},
+\end{equation}
+
+where $\pi_{\text{worker}}$ denotes the policy used by the worker when the trajectory was collected. Since this policy may differ from the current learner policy $\pi_\theta$, \gls{appo} is not strictly on-policy in the same sense as \gls{ppo}.
+
+Algorithmically, \gls{appo} remains a model-free policy-gradient method. It does not learn an explicit model of the environment and therefore does not directly solve the delayed credit assignment problem. In the Game of Science environment, its main advantage over \gls{ppo} is expected to be more efficient experience collection, not a fundamentally different learning signal.
+
+\section{Model-Based Reinforcement Learning}
+
+Model-free reinforcement learning methods learn policies or value functions directly from environment interaction, without learning an explicit model of the environment. Model-based methods instead learn a predictive model of the environment dynamics. This model captures how states change and rewards are produced after actions are taken. The learned model can then be used to improve sample efficiency or to support planning.
+
+A common form of model-based reinforcement learning is the use of world models. A world model learns an internal representation of the environment and can generate possible future trajectories without requiring additional interaction with the real environment. This allows the agent to reuse collected experience more efficiently.
+
+In latent world models, the agent does not necessarily predict full observations directly. Instead, it learns a compact latent representation of the environment state. Policies can then be trained on imagined trajectories in this latent space. This is often more efficient than planning directly in the original observation space and is especially relevant for algorithms such as DreamerV3.
+
+\section{DreamerV3}
+
+DreamerV3 extends the model-based idea described above by combining a latent world model with actor--critic learning \cite{hafner2024masteringdiversedomainsworld}. The algorithm uses collected environment experience to train a recurrent latent dynamics model. Starting from replayed observations, this model predicts future latent states, rewards, and continuation signals.
+
+The actor and critic are then trained on imagined trajectories generated by the learned model. The actor learns which actions to select in the latent state, while the critic estimates the expected return of these imagined trajectories. This allows DreamerV3 to perform policy learning without requiring new environment interaction for every policy update.
+
+A central advantage of this approach is sample efficiency. Since real experience can be reused through replay and imagination, DreamerV3 can potentially learn more from each collected transition than purely model-free methods. This is especially relevant for environments with delayed rewards, where useful feedback may only appear after several intermediate decisions.
+
+In the Game of Science environment, DreamerV3 is theoretically attractive because reputation rewards depend on multi-step processes such as collaboration formation, effort accumulation, project completion, and stochastic acceptance. If the world model captures these dynamics well enough, imagined rollouts may help the agent learn from delayed consequences more efficiently than PPO or APPO.
+
+However, DreamerV3 also introduces an additional source of error. The policy is trained on trajectories generated by the learned model, so inaccurate model predictions can directly mislead the actor and critic. This is a serious concern in the Game of Science environment, where outcomes are stochastic, partially observable, and strongly affected by fixed-policy agents. Therefore, DreamerV3 has higher potential sample efficiency, but also depends more strongly on the quality of the learned model.
+
+\section{Comparison of PPO, APPO and DreamerV3}
+
+The three algorithms represent different reinforcement learning approaches. \gls{ppo} is an on-policy actor--critic method that uses a clipped surrogate objective to keep policy updates stable. This makes it a robust baseline, but it remains sample-inefficient when rewards are delayed and noisy.
+
+\gls{appo} is closely related to \gls{ppo}, but uses asynchronous and distributed sampling. This can improve wall-clock efficiency because multiple workers collect experience in parallel. However, \gls{appo} remains a model-free policy-gradient method and therefore faces the same credit assignment problem as \gls{ppo}.
+
+DreamerV3 differs more clearly from both methods. It learns a world model and trains the actor and critic on imagined trajectories. This can improve sample efficiency and may help with long-term dependencies, but only if the learned model captures the relevant environment dynamics.
+
+In the Game of Science environment, this comparison is important because rewards are delayed and depend on multi-step interactions between collaboration, project selection, and effort allocation. \gls{ppo} and \gls{appo} learn only from sampled returns, while DreamerV3 may benefit from modeling project dynamics. At the same time, DreamerV3 is more sensitive to model errors in this stochastic multi-agent setting.
+
+\section{Evaluation and Reproducibility in Deep RL}
+
+Evaluating \gls{drl} algorithms is difficult because training results can vary strongly between runs. Even when hyperparameters and implementation details are kept fixed, small stochastic differences can lead to noticeably different outcomes. Nagarajan et al.~\cite{Nagarajan2018TheIO} show that sources such as GPU operations, random exploration, network initialization, and minibatch sampling can already be enough to change the final performance.
+
+This is especially problematic because \gls{drl} training is non-stationary. Small differences early in training can affect which parts of the state space are explored and may grow into very different learning trajectories over time. Nagarajan et al.~\cite{Nagarajan2018TheIO} therefore distinguish between reproducibility and replicability. This thesis uses the following definitions:
+
+\textbf{Reproducibility}: An experiment can be repeated with small differences while still leading to the same overall conclusions.
+
+\textbf{Replicability}: An experiment produces identical numerical results under identical experimental conditions.
+
+For the Game of Science environment, strict replicability is not realistic. The environment is stochastic, the training process is non-stationary, and outcomes depend on many interacting agents. This thesis therefore focuses on statistical reproducibility instead of identical numerical results.
+
+\subsection{Seed Sensitivity and Sources of Nondeterminism}
+
+Random seeds affect several parts of the training process, including network initialization, exploration behavior, environment dynamics, and minibatch sampling. As a result, changing only the global random seed can already lead to statistically significant performance differences \cite{Nagarajan2018TheIO}.
+
+Some sources of nondeterminism can be partially controlled through explicit seed management. Others, such as hardware-specific GPU operations and low-level numerical implementations, are harder to eliminate completely. Therefore, reporting a single training run is not sufficient for a reliable evaluation. In this thesis, results are reported across multiple seeds, and evaluation metrics are presented using the mean and standard deviation across runs.
+
+\section{The Game of Science Environment}
+
+\subsection{Overview of the Environment}
+The environment used in this thesis is based on the agent-based model introduced by Christof Bless \cite{bless_game_of_science_2026}. The model formulates scientific knowledge production as a general-sum stochastic Markov game with dynamic population and overlapping coalitions.
+
+From the perspective of a single learning agent interacting with fixed-policy archetypes, the problem can be interpreted as a partially observable Markov decision process (POMDP) with non-stationary dynamics. The agent does not observe the full global state, but instead receives a structured local observation.
+
+Non-stationarity arises from population turnover, evolving peer structures, and reputation-driven interaction dynamics. As a result, the effective transition dynamics change over time, even though the underlying archetype policies remain fixed.
+
+\subsection{Environment Dynamics}
+The environment models agents as researchers who interact through collaboration, project participation, and effort allocation. At each time step, agents select collaborators, choose projects, and invest effort.
+
+Collaborations are formed through mutual agreement, resulting in coalition structures that jointly work on projects. Projects evolve over multiple time steps as effort accumulates and are eventually evaluated based on their quality.
+
+The environment further includes dynamic population processes. Agents may be eliminated after prolonged periods without reward or retire after reaching a maximum age, while new agents may enter the system. In addition, peer groups are periodically restructured, leading to continuously evolving interaction networks.
+
+These mechanisms result in a highly dynamic system in which both the population and the collaboration structure change over time.
+
+\subsection{State, Observation, and Action Space}
+
+The global state contains all information needed to describe the environment. This includes information about agents, projects, and system-level variables.
+
+Each agent is described by its topic centroid in a two-dimensional knowledge space, its accumulated reputation, age, and active projects. Projects are described by their position, required effort, accumulated effort, prestige, novelty, societal value, and deadline. At the system level, the environment keeps track of past projects, population statistics, and global parameters such as the reward scheme and acceptance threshold.
+
+The learning agent does not observe this full global state. Instead, it receives a structured local observation. This observation contains information about the controlled agent, its peer group, available project opportunities, and currently running projects. Important parts of the global state, such as the full population state or future actions of other agents, remain hidden.
+
+At each timestep, the agent selects an action with three components: collaboration decisions, project selection, and effort allocation. The action space is represented with separate action heads. Collaboration is represented as a binary decision over peer slots, while project selection and effort allocation are represented as discrete choices.
+
+\begin{equation}
+\pi(a|o)=\pi_1(\text{collaborate}|o)\cdot\pi_2(\text{project}|o)\cdot\pi_3(\text{effort}|o)
+\end{equation}
+
+Here, $o$ denotes the agent's local observation. This factorization avoids explicitly enumerating all possible joint actions and makes policy learning more scalable.
+
+\subsection{Reward Mechanism}
+
+Rewards in the Game of Science environment are modeled as reputation gains. An agent only receives reputation when a project is completed and accepted.
+
+Project quality depends on accumulated effort, novelty, and societal value, together with density effects and stochastic noise:
+
+\begin{equation}
+Q_p = f(B_{\text{effort}} + B_{\text{novelty}} + B_{\text{societal}}, \text{density}, \epsilon)
+\end{equation}
+
+Acceptance is determined by comparing the noisy project quality score to a prestige-dependent threshold. This means that completed projects are not guaranteed to be accepted, which adds additional stochasticity to the reward process.
+
+If a project is accepted, its reward is distributed among the collaborators according to a predefined reward scheme. The implemented schemes are \textit{multiply}, \textit{even}, and \textit{by effort}. These schemes define how reputation is shared between the participating agents.
+
+The reward for agent $i$ at time $t$ can be written as:
+
+\begin{equation}
+r_t^i = \sum_{\text{accepted projects}} \text{reward\_share}
+\end{equation}
+
+This reward structure creates delayed feedback. Actions such as choosing collaborators, starting a project, or allocating effort may only affect the reward many timesteps later, when the project is completed and evaluated. As a result, the learning signal is noisy and temporally distant, which makes credit assignment difficult.
+
+%----------------------------------------------------------------------------------------
+% KAPITEL 3: Ideas and concepts
+%----------------------------------------------------------------------------------------
+\chapter{Ideas and Concepts}
+
+This chapter describes the main design choices behind the experimental setup. It explains why this thesis uses a single learning agent, why the final evaluation focuses on \gls{ppo} and \gls{appo}, and why the experiments use the \textit{by effort} reward scheme. Technical details such as environment integration, observation and action encoding, action masking, seeding, and hyperparameters are described in Chapter~4.
+
+\section{Conceptual Design Decisions}
+
+\subsection{Single Learning Agent in a Multi-Agent Environment}
+
+The Game of Science is a multi-agent simulation where outcomes depend on collaboration, competition, and stochastic project acceptance. A full multi-agent reinforcement learning setup would train several adaptive agents at the same time. While this would better capture co-adaptation between agents, it would also make the results much harder to interpret. If several agents change their behavior simultaneously, it becomes difficult to determine whether an observed effect is caused by one learning agent, another learning agent, or their interaction.
+
+For this reason, this thesis deliberately does not implement a full MARL setup. Instead, it uses a single-agent training setup. Only one agent is trained with reinforcement learning, while all other agents follow fixed heuristic archetype policies. This keeps the social dynamics of the environment intact, but makes the learning problem more manageable and allows a clearer comparison between algorithms.
+
+This design choice is especially important because a major part of this thesis is not only to measure performance, but also to analyze the learned behavior in detail. With fixed-policy background agents, changes in behavior can be attributed more clearly to the learning agent itself. This makes it easier to study how the agent collaborates, selects projects, allocates effort, and whether it develops behavior that differs from the predefined archetypes.
+
+From the learning agent's perspective, the fixed-policy agents become part of the environment. Their decisions influence collaboration formation, project progress, and reward generation, but they cannot be controlled directly. This creates partial observability and apparent non-stationarity, even though only one agent is learning.
+
+\subsection{Algorithm Choice and Considered Alternatives}
+
+The environment produces a weak and noisy learning signal. Rewards are delayed until projects are completed and accepted, outcomes are stochastic, and success depends on the behavior of other agents. The final evaluation focuses on two model-free policy-gradient algorithms:
+
+\begin{itemize}
+    \item \textbf{PPO} is used as a stable and widely used model-free baseline.
+    \item \textbf{APPO} is used as a distributed variant that may improve wall-clock efficiency through asynchronous sampling.
+\end{itemize}
+
+DreamerV3 was initially considered and implemented as a model-based alternative, but it is not included in the final evaluation due to incompatibilities with the structured multi-head action space and the masking/repair mechanism. Details are discussed in Chapter~5.
+
+Other approaches were also considered but not prioritized. Value-based methods such as DQN are less suitable for the structured multi-component action space and the action validity constraints of this environment. Multi-agent reinforcement learning would better capture co-adaptation between agents, but would also introduce a moving-target problem and increase computational cost. Imitation learning would require expert demonstrations, which are not available in this setting.
+
+A random-action baseline is included as a sanity check. It is used to verify whether trained agents perform better than trivial random behavior.
+
+\section{Evaluation Strategy}
+
+\subsection{Focus on the \textit{by effort} Reward Scheme}
+
+This thesis focuses on the \textit{by effort} reward scheme. In this scheme, reputation gains from accepted projects are distributed according to the effort contributed by each agent. This makes the scheme especially relevant for reinforcement learning, because the learning agent is rewarded more directly for its own contribution.
+
+The \textit{by effort} scheme is also expected to be one of the more difficult reward settings. Rewards still depend on delayed project completion and stochastic acceptance, but the agent must additionally learn when and where effort allocation is useful. This creates a difficult credit assignment problem, because the effect of effort decisions may only become visible many timesteps later.
+
+At the same time, this reward scheme is particularly interesting because it may encourage the agent to develop its own strategy instead of mainly relying on free-riding. In reward schemes where reputation is shared more evenly, an agent may benefit from joining successful collaborations without contributing much effort itself. Under \textit{by effort}, this behavior is less attractive, since reputation depends more directly on the agent's own contribution.
+
+The other reward schemes are not used for training in this thesis. However, they are included during evaluation to test whether learned behavior generalizes to different incentive structures.
+
+\subsection{Behavior-Level Interpretation Through Archetype Similarity}
+
+Return-based metrics show how well an agent performs, but they do not explain how the agent behaves. Two agents can achieve similar returns while using very different strategies for collaboration, project selection, or effort allocation.
+
+To make the learned behavior easier to interpret, this thesis compares the actions of the trained agent with the actions of fixed heuristic archetypes. The goal is not to prove full policy equivalence. Instead, the analysis checks whether the learned policy resembles a known archetype, combines traits from multiple archetypes, or follows a different behavioral pattern.
+
+This comparison is counterfactual. The archetype policies are evaluated on observations generated by the learning agent, not on their own state distributions. Therefore, the analysis measures local action similarity rather than full policy equivalence. The concrete similarity metrics are defined in Chapter~4.
+
+\section{Expected Challenges}
+
+Based on the structure of the Game of Science environment, several learning challenges are expected:
+
+\begin{itemize}
+    \item Delayed rewards weaken the learning signal and increase the variance of policy updates.
+    \item Partial observability limits the agent's understanding of coalition formation and project dynamics.
+    \item Population turnover and changing peer groups create distribution shift during training.
+    \item Stochastic project acceptance makes outcomes noisy and complicates credit assignment.
+    \item The \textit{by effort} reward scheme adds an additional challenge, because the agent must learn useful effort allocation instead of only joining promising collaborations.
+\end{itemize}
+
+It is expected that \gls{ppo} and \gls{appo} face the same underlying signal-quality problem. Both are model-free policy-gradient methods and must infer useful behavior from sampled trajectories. In the Game of Science environment, this is difficult because rewards are delayed, noisy, and influenced by other agents.
+
+\gls{ppo} is expected to provide the more stable baseline because it uses a synchronous training setup and was tuned more extensively in this thesis. \gls{appo} may improve wall-clock efficiency through asynchronous experience collection, but it should not fundamentally change the learning problem. Its potential advantage is therefore computational rather than conceptual: it may collect and process experience more efficiently, but it still has to learn from the same delayed and noisy reward signal.
+
+DreamerV3 was initially expected to have higher sample efficiency because of its learned world model. In practice, however, the required changes to make it compatible with the structured action space and masking/repair were beyond the scope of this thesis. It is therefore not included in the final evaluation (see Chapter~5).
+
+%----------------------------------------------------------------------------------------
+% KAPITEL 4: Methods
+%----------------------------------------------------------------------------------------
+\chapter{Methods}
+
+This chapter describes the scientific methodology used to investigate reinforcement learning in the Game of Science environment. The focus is on the experimental design, evaluation strategy, and reproducibility approach rather than implementation details, which are covered in Chapter 5.
+
+\section{Research Approach}
+
+This work follows an empirical comparative study methodology. Three reinforcement learning algorithms are trained and evaluated in a controlled multi-agent environment to answer the research questions formulated in Chapter 1. The methodological approach consists of:
+
+\begin{enumerate}
+    \item \textbf{Algorithm Selection}: Choosing representative algorithms from different RL paradigms
+    \item \textbf{Controlled Experimentation}: Training under identical conditions with systematic variation
+    \item \textbf{Multi-Seed Evaluation}: Statistical validation across multiple random seeds
+    \item \textbf{Behavioral Analysis}: Interpretative comparison with fixed policy archetypes
+\end{enumerate}
+
+This methodology enables both quantitative performance comparison and qualitative behavioral interpretation.
+
+\section{Algorithm Selection and Justification}
+
+Three reinforcement learning algorithms were selected to represent different approaches to policy learning in complex environments:
+
+\subsection{Proximal Policy Optimization (PPO)}
+
+PPO was selected as the primary baseline for several reasons. First, it represents the state-of-the-art in on-policy reinforcement learning and has demonstrated strong empirical performance across diverse domains. Second, its synchronous training structure and clipped objective function provide stable learning dynamics, which is important in environments with noisy and delayed rewards. Third, PPO is widely used in the research community, making results directly comparable to related work.
+
+From a methodological perspective, PPO serves as the reference point against which other algorithms are compared. Its well-understood behavior and extensive hyperparameter tuning make it a reliable baseline for detecting algorithmic improvements.
+
+\subsection{Asynchronous Proximal Policy Optimization (APPO)}
+
+APPO was included to investigate whether asynchronous experience collection improves sample efficiency or wall-clock training time. APPO extends PPO with distributed rollout workers and V-trace corrections, which theoretically enables faster experience collection without sacrificing policy quality.
+
+The methodological motivation is to test whether the delayed reward problem in the Game of Science environment can be mitigated through higher sample throughput rather than improved credit assignment. If APPO achieves similar performance with shorter training time, this suggests that the learning bottleneck is sample availability rather than algorithmic limitations.
+
+\subsection{DreamerV3}
+
+DreamerV3 was initially selected to represent model-based reinforcement learning. The theoretical motivation is that learning an explicit world model may improve credit assignment in environments with delayed rewards. By training a policy on imagined trajectories, DreamerV3 can potentially learn from multi-step consequences more efficiently than model-free methods.
+
+However, DreamerV3 is not included in the final evaluation due to incompatibilities with the structured action space and the masking/repair mechanism (see Chapter~5).
+
+\subsection{Random Agent Baseline}
+
+A random agent is included as a sanity check to verify that learned policies achieve non-trivial performance. This baseline establishes the lower bound of expected performance and helps identify whether the environment provides sufficient signal for learning.
+
+\section{Experimental Design}
+
+\subsection{Controlled Environment Variations}
+
+To test algorithmic robustness and scalability, three environment configurations were designed with increasing complexity:
+
+\paragraph{Experiment 1: Small-Scale Baseline.}
+A minimal configuration with a small population designed for rapid prototyping and initial validation. This setup enables quick iteration during development while maintaining the core environmental dynamics.
+
+\paragraph{Experiment 2: Medium-Scale Configuration.}
+The primary evaluation environment with moderate population size and peer group structure. This configuration is closest to the original Game of Science calibration and serves as the main basis for algorithmic comparison.
+
+\paragraph{Experiment 3: Large-Scale Scalability Test.}
+An extended configuration with significantly larger population and peer groups. This setup tests whether learned policies generalize to environments with increased social complexity and longer-range collaboration opportunities.
+
+The methodological rationale for multiple configurations is to distinguish between algorithm-specific limitations and environment-specific brittleness. An algorithm that performs well only in one configuration may be overfitting to specific environmental properties, while robust algorithms should maintain relative performance across scales.
+
+\subsection{Training and Evaluation Separation}
+
+All algorithms are trained using the \texttt{by\_effort} reward scheme, where reputation is distributed proportionally to effort contributed. This scheme was selected because it creates a direct link between action (effort allocation) and reward, which is theoretically more learnable than schemes with shared rewards.
+
+Evaluation is performed across all three reward schemes (\texttt{by\_effort}, \texttt{multiply}, \texttt{evenly}) to test policy generalization. This separation between training and evaluation incentives reveals whether learned behavior is robust to changes in the reward structure or narrowly optimized for the training objective.
+
+\subsection{Hyperparameter Optimization Strategy}
+
+Hyperparameter tuning follows a Bayesian optimization approach using Weights \& Biases sweeps. The methodological advantages of Bayesian optimization over grid or random search are:
+
+\begin{itemize}
+    \item \textbf{Sample efficiency}: Fewer configurations are evaluated to find near-optimal settings
+    \item \textbf{Adaptive search}: Promising regions of hyperparameter space are explored more intensively
+    \item \textbf{Surrogate modeling}: A probabilistic model guides the search based on previous results
+\end{itemize}
+
+The optimization objective is mean episode return during training. Early termination is applied using Hyperband scheduling to reduce computational cost for poorly performing configurations.
+
+Only PPO underwent extensive hyperparameter optimization. APPO uses a baseline configuration adapted from PPO, which creates a methodological limitation discussed in Chapter 6. This asymmetry in tuning effort may favor PPO in the comparison.
+
+\section{Evaluation Methodology}
+
+\subsection{Performance Metrics}
+
+Evaluation is based on multiple complementary metrics to capture both outcome quality and behavioral characteristics:
+
+\paragraph{Primary Outcome Metrics.}
+Episodic return serves as the primary performance indicator, measuring cumulative reward over an episode. Episode length indicates agent survival time and is particularly relevant because agents can be eliminated after prolonged periods without reward.
+
+\paragraph{Academic Productivity Metrics.}
+H-index, completed projects, and accepted publications characterize the agent's success within the simulated scientific career. These metrics provide interpretability by relating abstract reward values to meaningful outcomes in the Game of Science context.
+
+\paragraph{Behavioral Metrics.}
+Project participation, effort allocation patterns, and collaboration choices characterize decision-making strategies. These metrics enable analysis of \emph{how} agents achieve their outcomes, not just \emph{what} outcomes they achieve.
+
+\paragraph{Sparse Reward Diagnostics.}
+Fraction of timesteps with positive reward, time to first reward, and rewardless termination rate diagnose whether agents struggle with reward sparsity. These metrics help identify whether poor performance results from algorithmic limitations or fundamental environment properties.
+
+The multi-dimensional evaluation approach prevents overemphasis on a single metric and enables richer interpretation of algorithmic strengths and weaknesses.
+
+\section{Reproducibility Strategy}
+
+Reproducibility is a central methodological concern in deep reinforcement learning research. Training outcomes can vary significantly due to initialization, exploration, and environment stochasticity. This work addresses reproducibility through three complementary approaches:
+
+\subsection{Multi-Seed Evaluation}
+
+Statistical reproducibility is prioritized over bitwise determinism. Each algorithm is trained with 10 independent random seeds and evaluated on 10 environment seeds, yielding 100 evaluation episodes per algorithm. This multi-seed approach enables:
+
+\begin{itemize}
+    \item \textbf{Robustness verification}: Ensures conclusions are not artifacts of lucky initialization
+    \item \textbf{Variance quantification}: Measures sensitivity to stochastic factors
+    \item \textbf{Statistical testing}: Provides sufficient samples for significance testing
+\end{itemize}
+
+Results are reported as mean $\pm$ standard deviation across all evaluation episodes.
+
+\subsection{Deterministic Seeding Strategy}
+
+All major sources of randomness are explicitly seeded, including Python's random module, NumPy, PyTorch, RLlib, and the environment. Hierarchical seeding ensures that each parallel worker and episode has a unique but deterministic seed derived from the base experiment seed.
+
+However, full bitwise determinism cannot be guaranteed due to GPU-level nondeterminism, distributed execution scheduling, and floating-point accumulation order. The methodology therefore focuses on statistical reproducibility: ensuring that repeated experiments with different seeds lead to consistent conclusions rather than identical numerical values.
+
+\subsection{Experiment Logging and Artifact Management}
+
+All experiments are logged using Weights \& Biases, which records:
+
+\begin{itemize}
+    \item Hyperparameter configurations
+    \item Training and evaluation metrics
+    \item Random seeds
+    \item Code versions and dependencies
+    \item Model checkpoints
+\end{itemize}
+
+This comprehensive logging enables experiments to be traced, compared, and potentially reproduced by other researchers.
+
+
+\section{Behavioral Similarity Analysis}
+
+Beyond performance metrics, behavioral similarity analysis provides interpretability by characterizing learned policies in terms of known behavioral strategies.
+
+\subsection{Counterfactual Evaluation Approach}
+
+The analysis method is counterfactual: observations from \gls{ppo} evaluation episodes are replayed through archetype policies to generate counterfactual actions. These are compared to the \gls{ppo} agent's actual actions using similarity metrics.
+
+This approach has an important methodological limitation. The archetype policies are evaluated on a state distribution shaped by the \gls{ppo} agent's behavior, not their own. Therefore, the comparison measures \emph{local action similarity} rather than full policy equivalence. High similarity on individual timesteps does not necessarily imply equivalent long-term behavior.
+
+\subsection{Similarity Metrics}
+
+Different metrics are used for different action components:
+
+\paragraph{Discrete Actions.}
+For project selection and effort allocation, exact agreement is computed as the fraction of timesteps where both agents select the same action. For effort allocation, absolute slot difference is also recorded to measure near-miss similarity.
+
+\paragraph{Collaboration Vectors.}
+For high-dimensional binary collaboration vectors, cosine similarity is used instead of exact agreement. This metric is more robust to minor differences in peer selection and captures whether agents exhibit similar collaboration patterns even if they do not select identical peer sets.
+
+\subsection{Interpretation Framework}
+
+Results are aggregated across all evaluation episodes and reported per archetype. A similarity profile is constructed that characterizes which archetype(s) the learned policy most resembles:
+
+\begin{itemize}
+    \item \textbf{Strong similarity to one archetype}: Suggests the learned policy approximates a known strategy
+    \item \textbf{Moderate similarity to multiple archetypes}: Suggests a hybrid behavioral strategy
+    \item \textbf{Low similarity to all archetypes}: Suggests a novel behavioral strategy not captured by the archetypes
+\end{itemize}
+
+This interpretative framework enables qualitative characterization of learned behavior beyond quantitative performance metrics.
+
+%----------------------------------------------------------------------------------------
+% KAPITEL 5: REALISIERUNG
+%----------------------------------------------------------------------------------------
+\chapter{Realisierung}
+
+This chapter documents the technical implementation of the reinforcement learning system. It describes how the methodological choices from Chapter 4 were realized in code, including environment integration, algorithm configuration, training infrastructure, and evaluation pipelines.
+
+\section{Software Architecture}
+
+The implementation is structured around three main components:
+
+\begin{enumerate}
+    \item \textbf{Environment Wrapper}: Adapts the Game of Science multi-agent simulation to RLlib's single-agent interface
+    \item \textbf{Training Pipeline}: Orchestrates algorithm configuration, hyperparameter optimization, and distributed training
+    \item \textbf{Evaluation and Analysis}: Implements metrics collection, behavioral analysis, and result visualization
+\end{enumerate}
+
+All code is implemented in Python 3.10 using RLlib 2.9, PyTorch 2.0, and Gymnasium 0.29. The project follows a modular structure with clear separation between environment code, training scripts, and analysis tools.
+
+\section{Environment Integration}
+
+\subsection{Single-Agent Wrapper Implementation}
+
+The wrapper transforms the multi-agent Game of Science environment into a single-agent Gymnasium environment by exposing only one controllable agent (\texttt{agent\_0}). The implementation is located in \texttt{src/rllib\_single\_agent\_wrapper.py}.
+
+The wrapper maintains an internal multi-agent simulation where background agents follow fixed archetype policies. At each step, the wrapper:
+
+\begin{enumerate}
+    \item Receives an action from RLlib for the controlled agent
+    \item Generates actions for all background agents using their archetype policies
+    \item Steps the internal environment with the combined action dict
+    \item Extracts and returns only the controlled agent's observation, reward, and termination status
+\end{enumerate}
+
+This design preserves the multi-agent dynamics while maintaining compatibility with RLlib's single-agent algorithms.
+
+\subsection{Observation Encoding}
+
+The raw observations are nested dictionaries with variable-size components. The wrapper implements a slot-based encoding that maps observations to fixed-size vectors.
+
+\paragraph{Running Projects Encoding.}
+Projects are assigned to slots indexed 0 to \texttt{max\_projects\_per\_agent} $-$ 1. Each slot contains 17 features:
+
+\begin{itemize}
+    \item \texttt{is\_active}: Binary flag (1 if slot contains an active project, 0 if empty)
+    \item Progress: \texttt{current\_effort}, \texttt{remaining\_effort}, \texttt{progress\_ratio}
+    \item Urgency: \texttt{time\_left}, \texttt{urgency} $= 1 / \max(\text{time\_left}, 1)$
+    \item Quality: \texttt{prestige}, \texttt{novelty}, \texttt{societal\_value}
+    \item Collaboration: \texttt{num\_contributors}, \texttt{peer\_fit\_mean}, \texttt{peer\_fit\_max}, \texttt{total\_contributor\_effort}
+    \item Slot identity: \texttt{slot\_index}, \texttt{slot\_index\_normalized}, \texttt{slot\_one\_hot} (one-hot encoding)
+\end{itemize}
+
+Empty slots are represented with \texttt{is\_active} = 0 and default values for all other features.
+
+\paragraph{Observation Space Dimensionality.}
+For the medium-scale configuration, the flattened observation contains approximately 356 float32 features:
+
+\begin{itemize}
+    \item Agent state: $\approx$ 50 features (reputation, age, topic centroid, peer group membership)
+    \item Running projects: $8 \times 17 = 136$ features
+    \item Peer information: $40 \times 3 = 120$ features (reputation, topic distance, availability)
+    \item Action masks: $\approx$ 50 features (validity indicators)
+\end{itemize}
+
+This encoding ensures constant dimensionality regardless of how many projects are actually active.
+
+\subsection{Action Space Definition}
+
+The action space is structured as a Gymnasium \texttt{Dict} space with three components:
+
+\begin{verbatim}
+action_space = gym.spaces.Dict({
+    "choose_project": gym.spaces.Discrete(n_projects_per_step + 1),
+    "put_effort": gym.spaces.Discrete(max_projects_per_agent + 1),
+    "collaborate_with": gym.spaces.MultiDiscrete(
+        [2] * max_peer_group_size
+    )
+})
+\end{verbatim}
+
+The $+1$ in discrete spaces provides a no-op action (encoded as 0). The \texttt{collaborate\_with} action is a binary vector where each dimension represents a yes/no collaboration decision for the corresponding peer slot.
+
+RLlib's policy learns a factorized distribution:
+
+\begin{equation}
+\pi(a|o) = \pi_{\text{choose}}(a_{\text{choose}}|o) \cdot \pi_{\text{effort}}(a_{\text{effort}}|o) \cdot \pi_{\text{collab}}(a_{\text{collab}}|o)
+\end{equation}
+
+This factorization avoids explicitly enumerating the combinatorially large joint action space.
+
+\subsection{Action Masking and Repair}
+
+The environment provides action masks indicating valid actions, but not all RLlib algorithms support native action masking. Therefore, the wrapper implements post-hoc action repair:
+
+\begin{enumerate}
+    \item The policy samples an action (potentially invalid)
+    \item The wrapper checks validity using the action mask
+    \item Invalid actions are repaired to the no-op action (0)
+    \item The repaired action is executed in the environment
+\end{enumerate}
+
+This repair mechanism is implemented in the \texttt{\_apply\_action\_mask} method. Repair statistics are logged as metrics:
+
+\begin{verbatim}
+"mask/repair_rate_total": overall_repair_rate
+"mask/repair_choose_project_rate": project_repair_rate
+"mask/repair_put_effort_rate": effort_repair_rate
+"mask/repair_collab_rate": collaboration_repair_rate
+\end{verbatim}
+
+High repair rates indicate that the policy frequently attempts invalid actions, which may signal learning difficulties.
+
+\section{Algorithm Configuration}
+
+\subsection{PPO Configuration}
+
+PPO was configured using RLlib's \texttt{PPOConfig} with hyperparameters identified through Bayesian optimization. The final configuration (located in \texttt{scripts/train\_rl\_agent.py}) is:
+
+\paragraph{Core Hyperparameters.}
+\begin{itemize}
+    \item Learning rate: $2.04 \times 10^{-4}$
+    \item Discount factor $\gamma$: 0.958
+    \item GAE parameter $\lambda$: 0.963
+    \item Training batch size: 10,000 timesteps
+    \item Minibatch size: 512 timesteps
+    \item Number of SGD epochs: 3
+    \item Entropy coefficient: 0.0055
+    \item Value function loss coefficient: 1.94
+    \item Gradient clipping: 0.52
+    \item Value function clipping: 5.0
+\end{itemize}
+
+\paragraph{Network Architecture.}
+The policy and value networks share a common trunk with two hidden layers of 256 units each, using tanh activation:
+
+\begin{verbatim}
+model = {
+    "fcnet_hiddens": [256, 256],
+    "fcnet_activation": "tanh",
+    "vf_share_layers": True
+}
+\end{verbatim}
+
+Shared layers reduce parameter count and enable the value function to benefit from policy representations.
+
+\paragraph{Parallelization.}
+Five rollout workers collect experience in parallel, with each worker collecting 200 timesteps per rollout fragment. This yields approximately 1000 timesteps per iteration before policy updates.
+
+\paragraph{Evaluation.}
+Evaluation runs every 3 training iterations using 2 dedicated evaluation workers. Each evaluation consists of 4 episodes with exploration disabled (\texttt{explore=False}).
+
+\subsection{APPO Configuration}
+
+APPO extends the PPO configuration with asynchronous experience collection and V-trace corrections:
+
+\paragraph{V-trace Parameters.}
+\begin{itemize}
+    \item V-trace enabled: \texttt{True}
+    \item $\rho$ clipping threshold: 1.14
+    \item Policy gradient $\rho$ clipping threshold: 1.39
+\end{itemize}
+
+V-trace corrects for the policy lag between rollout workers and the learner by importance sampling with clipped importance weights.
+
+\paragraph{Asynchronous Training.}
+\begin{itemize}
+    \item Target network update frequency: 1 iteration
+    \item Number of SGD iterations: 1
+    \item Minibatch buffer size: 1
+    \item Replay proportion: 0.0 (purely on-policy)
+    \item Learner workers: 0 (CPU-only training)
+    \item Broadcast interval: 2 iterations
+\end{itemize}
+
+The broadcast interval controls how frequently the updated policy is sent to rollout workers. Higher intervals increase staleness but reduce communication overhead.
+
+The network architecture remains identical to PPO to ensure architectural differences do not confound the algorithmic comparison.
+
+\subsection{DreamerV3 Configuration}
+
+DreamerV3 was initially configured using RLlib's new API stack (\texttt{RLModule} and \texttt{EnvRunnerV2}). The algorithm requires:
+
+\begin{itemize}
+    \item Continuous action space (actions in $[0,1]$ range)
+    \item GPU acceleration for world model training
+    \item Replay buffer for off-policy learning
+\end{itemize}
+
+However, DreamerV3 encountered compatibility issues with the Game of Science environment. The main challenges were:
+
+\paragraph{Action Space Mismatch.}
+DreamerV3 expects continuous Box actions, but the Game of Science environment uses a mixed Discrete/MultiDiscrete action space. While actions can be discretized post-hoc, this introduces quantization errors and complicates action masking.
+
+\paragraph{Action Repair and World Model Learning.}
+The wrapper's action repair mechanism creates a discrepancy between sampled actions and executed actions. DreamerV3's world model observes only repaired actions, which may prevent it from learning accurate dynamics for invalid action regions.
+
+Due to these issues and time constraints, DreamerV3 was not included in the final evaluation. Resolving these challenges would require substantial changes to either the environment wrapper or the DreamerV3 implementation, which was beyond the scope of this thesis.
+
+\section{Training Infrastructure}
+
+\subsection{Training Loop Implementation}
+
+Training is orchestrated by the \texttt{scripts/train\_rl\_agent.py} script, which:
+
+\begin{enumerate}
+    \item Initializes the environment with specified configuration
+    \item Registers the environment with RLlib
+    \item Configures the algorithm with hyperparameters
+    \item Runs training for a fixed budget of 1,000,000 environment steps
+    \item Logs metrics to Weights \& Biases
+    \item Saves checkpoints periodically
+\end{enumerate}
+
+The training budget is specified in environment steps rather than iterations to ensure fair comparison across algorithms with different batch sizes. The number of iterations is automatically calculated:
+
+\begin{equation}
+N_{\text{iterations}} = \left\lceil \frac{\text{max\_env\_steps}}{\text{train\_batch\_size}} \right\rceil
+\end{equation}
+
+For PPO with a batch size of 10,000, this yields 100 training iterations.
+
+\subsection{Checkpoint Management}
+
+Checkpoints are saved at two points:
+
+\begin{itemize}
+    \item \textbf{Best checkpoint}: Saved whenever evaluation performance exceeds the previous best
+    \item \textbf{Periodic checkpoints}: Saved every 5 iterations regardless of performance
+\end{itemize}
+
+Each checkpoint includes:
+
+\begin{itemize}
+    \item Policy and value network weights
+    \item Optimizer state
+    \item Training iteration counter
+    \item RLlib configuration
+\end{itemize}
+
+Checkpoints enable resumption of interrupted training and facilitate post-training evaluation.
+
+\subsection{Metrics Logging}
+
+Metrics are logged to Weights \& Biases at every training iteration. The logged metrics include:
+
+\begin{itemize}
+    \item Training metrics: Episode return, episode length, policy entropy, value loss, policy loss
+    \item Evaluation metrics: Mean/std return over evaluation episodes
+    \item Environment metrics: Sparse reward diagnostics, action repair rates
+    \item Algorithm-specific: KL divergence, explained variance, gradient norms
+\end{itemize}
+
+W\&B provides visualization, comparison across runs, and long-term experiment tracking.
+
+\section{Hyperparameter Optimization}
+
+Hyperparameter optimization was performed using Bayesian search via Weights \& Biases sweeps (implemented in \texttt{scripts/wandb\_sweep\_rl\_agent.py}).
+
+\subsection{Sweep Configuration}
+
+The sweep defines:
+
+\begin{itemize}
+    \item \textbf{Method}: Bayesian optimization
+    \item \textbf{Metric}: \texttt{train/episode\_return\_mean} (maximize)
+    \item \textbf{Early termination}: Hyperband with min\_iter=5, eta=2
+\end{itemize}
+
+Search spaces for key hyperparameters:
+
+\begin{verbatim}
+parameters = {
+    "lr": {"distribution": "log_uniform_values",
+           "min": 1e-5, "max": 5e-4},
+    "entropy_coeff": {"distribution": "log_uniform_values",
+                      "min": 0.005, "max": 0.008},
+    "vf_loss_coeff": {"distribution": "uniform",
+                      "min": 1.9, "max": 2.0},
+    "grad_clip": {"distribution": "uniform",
+                  "min": 0.50, "max": 0.54},
+    "gamma": {"distribution": "uniform",
+              "min": 0.958, "max": 0.96},
+    "train_batch_size": {"values": [1000, 2000, 4000]}
+}
+\end{verbatim}
+
+Each sweep run trains for 300,000 environment steps, which provides sufficient signal for hyperparameter quality assessment while remaining computationally tractable.
+
+\subsection{Sweep Execution}
+
+The sweep agent runs in a loop:
+
+\begin{enumerate}
+    \item W\&B server suggests a hyperparameter configuration
+    \item Agent trains a model with that configuration
+    \item Agent reports the final episode return to W\&B
+    \item W\&B updates its surrogate model and suggests the next configuration
+\end{enumerate}
+
+Hyperband early termination stops poorly performing runs after iteration 5, 10, or 20 based on performance quantiles.
+
+\subsection{Sweep Results}
+
+The sweep identified learning rate and training batch size as the most influential hyperparameters. Entropy coefficient and value loss coefficient had moderate effects, while $\gamma$ and $\lambda$ (within the tested ranges) had minimal impact.
+
+The final PPO configuration uses the best-performing hyperparameters from 30+ sweep runs.
+
+\section{Reproducibility Implementation}
+
+\subsection{Deterministic Seeding}
+
+Seeding is implemented in the \texttt{seed\_everything} function, which seeds all major sources of randomness:
+
+\begin{verbatim}
+def seed_everything(seed: int, workers: bool = True):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+
+torch.use_deterministic_algorithms(True, warn_only=True)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+\end{verbatim}
+
+The \texttt{warn\_only=True} flag allows nondeterministic operations that have no deterministic alternative while logging warnings.
+
+\subsection{Environment Seeding}
+
+Each environment instance creates its own RNG in the \texttt{reset} method:
+
+\begin{verbatim}
+def reset(self, seed=None, options=None):
+    if seed is not None:
+        self.rng = np.random.default_rng(seed)
+    # ... environment initialization
+\end{verbatim}
+
+For distributed training with multiple workers, each worker generates episode-specific seeds using NumPy's \texttt{SeedSequence}:
+
+\begin{verbatim}
+ss = np.random.SeedSequence([
+    base_seed, worker_index, vector_index, episode_counter
+])
+episode_seed = int(ss.generate_state(1, dtype=np.uint32)[0])
+obs, info = env.reset(seed=episode_seed)
+\end{verbatim}
+
+This hierarchical seeding ensures each episode has a unique but deterministic seed.
+
+\subsection{Training and Evaluation Seeds}
+
+Training runs use seeds 1--100, with 10 seeds selected for each experiment. Evaluation uses seeds 501--510. This separation prevents information leakage between training and evaluation:
+
+\begin{verbatim}
+TRAINING_SEEDS = list(range(1, 101))
+EVAL_SEEDS = list(range(501, 511))
+\end{verbatim}
+
+\section{Evaluation Pipeline}
+
+\subsection{Evaluation Script}
+
+Post-training evaluation is performed by \texttt{scripts/eval\_rl\_agent.py}, which:
+
+\begin{enumerate}
+    \item Loads a trained checkpoint
+    \item Reconstructs the environment configuration
+    \item Runs deterministic rollouts on evaluation seeds
+    \item Collects metrics (return, H-index, episode length, etc.)
+    \item Saves results to CSV for offline analysis
+\end{enumerate}
+
+Each checkpoint is evaluated on all 10 evaluation seeds with exploration disabled, yielding 10 evaluation episodes per trained model.
+
+\subsection{Metrics Collection}
+
+The evaluation script uses custom callbacks to extract environment-specific metrics beyond standard RL metrics. The \texttt{PapersMetricsCallback} (in \texttt{src/callbacks/papers\_metrics\_callback.py}) logs:
+
+\begin{itemize}
+    \item Agent outcomes: H-index, age, completed projects, successful projects
+    \item Sparse reward diagnostics: Steps to first reward, rewardless termination fraction
+    \item Behavioral statistics: Project participation, effort allocation, collaboration patterns
+\end{itemize}
+
+Metrics are aggregated across episodes and saved with per-seed granularity for statistical analysis.
+
+\subsection{Behavioral Similarity Analysis Implementation}
+
+The similarity analysis is implemented in \texttt{analysis/analyze\_agent\_similarity.py}. The pipeline:
+
+\begin{enumerate}
+    \item Loads evaluation trajectories (observations and actions) for the PPO agent
+    \item For each timestep, replays the observation through each archetype policy
+    \item Compares PPO actions to archetype actions using similarity metrics
+    \item Aggregates timestep-level similarities into episode-level and overall statistics
+\end{enumerate}
+
+\paragraph{Feature Extraction.}
+Actions are decomposed into structured features:
+
+\begin{verbatim}
+features = {
+    "choose_project_binary": int(action["choose_project"] > 0),
+    "chosen_project_prestige": project.prestige if chosen else 0,
+    "chosen_project_novelty": project.novelty if chosen else 0,
+    "n_selected_collaborators": np.sum(action["collaborate_with"]),
+    "mean_selected_peer_reputation": np.mean(reputations),
+    # ... additional features
+}
+\end{verbatim}
+
+\paragraph{Similarity Computation.}
+For discrete actions, exact agreement is computed:
+
+\begin{verbatim}
+agreement = (rl_action == archetype_action).mean()
+\end{verbatim}
+
+For collaboration vectors, cosine similarity is used:
+
+\begin{verbatim}
+from scipy.spatial.distance import cosine
+similarity = 1 - cosine(rl_collab_vec, archetype_collab_vec)
+\end{verbatim}
+
+Results are saved as CSV files and plots for each archetype comparison.
+
+\section{Implementation Challenges and Solutions}
+
+\subsection{Action Space Compatibility}
+
+The Dict action space with MultiDiscrete components required careful handling in RLlib. The factorized policy distribution is not natively supported, so the wrapper flattens actions internally while maintaining the Dict interface externally.
+
+\subsection{Observation Normalization}
+
+Initial experiments showed poor learning performance due to unnormalized observations. Features with large ranges (e.g., reputation values) dominated the network gradients. The solution was to normalize all features to similar scales using min-max normalization or standardization based on feature semantics.
+
+\subsection{Sparse Rewards}
+
+The Game of Science environment exhibits extreme reward sparsity: agents may not receive any reward for 50--100 timesteps. This delayed feedback makes credit assignment difficult. While the problem was not fully solved, sparse reward diagnostics enabled identification of training runs that failed to discover any rewarding behavior.
+
+\subsection{Computational Resources}
+
+Training 10 seeds per algorithm per experiment requires substantial computation. Each PPO training run takes approximately 2--3 hours on a machine with 6 CPU cores. Total compute for all experiments exceeded 200 CPU-hours.
+
+The sweep results showed that the learning rate had the strongest influence on \gls{ppo} performance, followed by the training batch size. Entropy coefficient and value loss coefficient had moderate effects, while $\gamma$ and $\lambda$ (within the tested ranges) had minimal impact.
+
+\section{Software and Hardware Environment}
+
+The implementation uses Python 3.10, RLlib 2.9, PyTorch 2.0, and Gymnasium 0.29. Training was performed on NVIDIA GPUs with CUDA 11.8. All dependencies are managed through a conda environment specification to ensure reproducibility.
+
+%----------------------------------------------------------------------------------------
+% KAPITEL 6: VALIDATION and EVALUATION
+%----------------------------------------------------------------------------------------
+\chapter{Validation and Evaluation}
+
+\section{Evaluation Overview}
+
+This chapter evaluates the trained reinforcement learning agents against the random baseline. The final evaluation focuses on \gls{ppo} and \gls{appo}. DreamerV3 is not included in the final evaluation; the implementation was not sufficiently compatible with the structured action space and masking/repair mechanism within the scope of this thesis (see Chapter~5).
+
+All experiments use the \texttt{by\_effort} reward scheme for training. This reward scheme is the main focus of this thesis because it directly links reputation gain to the effort contributed by an agent. As a result, it is expected to be more challenging than reward schemes that distribute reputation more evenly among collaborators.
+
+Three environment configurations are evaluated. The goal is not only to compare the algorithms under one fixed setup, but also to test how their behavior changes when the environment becomes slightly different or larger.
+
+\paragraph{Experiment 1: Baseline configuration.}
+Experiment 1 serves as the main baseline experiment. The environment configuration was selected because it is closest to the original Game of Science experiments by Bless, where all agents follow fixed behavioral archetype policies. In this thesis, one agent is replaced by a reinforcement learning agent, while all remaining agents still follow fixed policies. This setup tests whether a learning agent can perform better than random behavior while embedded in an otherwise archetype-based population.
+
+\paragraph{Experiment 2: Modified environment configuration.}
+Experiment 2 uses a slightly changed environment setup. Compared to Experiment 1, the total population size is increased from 400 to 600 agents, while the episode length is reduced from 600 to 400 steps. The initial population size and peer group size remain unchanged. This experiment tests whether the algorithms remain stable when the population is larger but the available time horizon is shorter. This is relevant because delayed rewards become harder to exploit when episodes end earlier.
+
+\paragraph{Experiment 3: Large-scale configuration.}
+Experiment 3 evaluates a larger and more demanding environment. The total population is increased to 2000 agents, the initial population to 200 agents, and the maximum peer group size to 100. This setup increases the complexity of the social environment and the collaboration decision space. The experiment therefore acts as a scalability test and examines whether the algorithms can still learn useful behavior in a larger population with more potential collaborators.
+
+\begin{table}[H]
+\centering
+\begin{tabular}{l r r r}
+\hline
+Parameter & Experiment 1 & Experiment 2 & Experiment 3 \\
+\hline
+\texttt{n\_agents} & 400 & 600 & 2000 \\
+\texttt{start\_agents} & 100 & 100 & 200 \\
+\texttt{max\_steps} & 600 & 400 & 600 \\
+\texttt{max\_rewardless\_steps} & 50 & 50 & 50 \\
+\texttt{n\_groups} & 10 & 10 & 10 \\
+\texttt{max\_peer\_group\_size} & 40 & 40 & 100 \\
+\texttt{n\_projects\_per\_step} & 1 & 1 & 1 \\
+\texttt{max\_projects\_per\_agent} & 8 & 8 & 8 \\
+\texttt{max\_agent\_age} & 750 & 750 & 750 \\
+\hline
+\end{tabular}
+\caption{Environment configurations used across the three experiments.}
+\label{tab:env_configs}
+\end{table}
+
+\begin{table}[H]
+\centering
+\begin{tabular}{l l}
+\hline
+Parameter & Value \\
+\hline
+\texttt{reward\_function} & \texttt{by\_effort} \\
+\texttt{acceptance\_threshold} & 0.44 \\
+\texttt{prestige\_threshold} & 0.29 \\
+\texttt{novelty\_threshold} & 0.40 \\
+\texttt{effort\_threshold} & 35 \\
+\hline
+\end{tabular}
+\caption{Reward and threshold configuration used across all three experiments.}
+\label{tab:reward_configs}
+\end{table}
+
+The environment configuration is shared across the random baseline, \gls{ppo}, and \gls{appo} within each experiment. This includes the number of agents, initial population size, group structure, maximum episode length, project generation settings, and reward configuration. Therefore, differences in performance should mainly result from the agent type or learning algorithm rather than from changes in the simulation setup.
+
+For \gls{ppo}, the final training configuration uses the best hyperparameter setting identified in the previous hyperparameter study. For \gls{appo}, no equally extensive hyperparameter tuning was available. It is therefore trained with its baseline configuration. This limitation is considered when interpreting the comparison between \gls{ppo} and \gls{appo}.
+
+
+\section{Experiment 1: Default Environment Baseline}
+
+\section{Experiment 2: Default Environment Baseline}
+
+\section{Experiment 3: Default Environment Baseline}
+
+\subsection{Performance Analysis}
+
+Random Baseline
+
+PPO
+
+APPO
+
+DreamerV3
+
+Figure~\ref{fig:exp1_reward_curves} shows the normalized accumulated reward over the course of the evaluation episodes. The \gls{ppo} agent is compared against the three fixed heuristic archetypes: \texttt{careerist}, \texttt{mass\_producer}, and \texttt{orthodox\_scientist}. The three panels correspond to the reward schemes \texttt{multiply}, \texttt{by\_effort}, and \texttt{evenly}.
+
+\begin{figure}[H]
+    \centering
+    % TODO: Insert combined figure with three panels:
+    % (a) multiply, (b) by_effort, (c) evenly
+    \includegraphics[width=\textwidth]{figures/exp1_reward_curves_all_schemes.pdf}
+    \caption{Normalized accumulated reward in Experiment 1 across the three evaluation reward schemes. The \gls{ppo} agent is compared against the fixed heuristic archetypes.}
+    \label{fig:exp1_reward_curves}
+\end{figure}
+
+\subsection{Agent-Level Outcome Distributions}
+
+Figure~\ref{fig:exp1_agent_outcomes} shows the final H-index and lifespan distributions of the PPO-controlled agent across the three evaluation reward schemes. These metrics provide additional outcome measures beyond accumulated reward.
+
+\begin{figure}[H]
+    \centering
+    % TODO: Insert combined figure with six panels:
+    % Rows: multiply, by_effort, evenly
+    % Columns: H-index distribution, lifespan distribution
+    \includegraphics[width=\textwidth]{figures/exp1_hindex_lifespan_all_schemes.pdf}
+    \caption{Final H-index and lifespan distributions of the \gls{ppo} agent in Experiment 1 across the three evaluation reward schemes.}
+    \label{fig:exp1_agent_outcomes}
+\end{figure}
+
+\subsection{Performance across Reward Schemes}
+
+Across all three evaluation reward schemes, the \gls{ppo} agent achieves a clear positive accumulated reward trajectory. This indicates that the learned policy does not only exploit the exact reward scheme used during training, but also produces behavior that receives reward under alternative evaluation schemes.
+
+The strongest performance relative to the heuristic baselines appears under the \texttt{evenly} reward scheme, where the \gls{ppo} agent remains clearly above the fixed archetypes throughout most of the episode. Under \texttt{multiply} and \texttt{by\_effort}, the \gls{ppo} agent also performs strongly for most of the episode, but the \texttt{mass\_producer} heuristic approaches or partially catches up near the end.
+
+\subsection{Comparison to Fixed Heuristic Archetypes}
+
+The \gls{ppo} agent clearly outperforms the \texttt{careerist} and \texttt{orthodox\_scientist} archetypes in accumulated reward across all three evaluation schemes. Both of these heuristic policies remain close to zero compared to the \gls{ppo} agent and the \texttt{mass\_producer}. This indicates that, in this environment configuration, conservative or quality-oriented strategies are less effective in terms of accumulated reward.
+
+The \texttt{mass\_producer} is the most competitive heuristic baseline. This is expected because the Game of Science environment rewards completed projects, and a policy that starts and completes many projects can accumulate reward effectively.
+
+\subsection{Variance and Survival Instability}
+
+The \gls{ppo} reward curves show a wide shaded region, indicating substantial variation across runs. This is also reflected in the H-index and lifespan distributions. Some evaluation runs produce high H-index values and survival until the maximum episode length, while others result in early removal and low publication impact.
+
+This variance is important because it means that \gls{ppo} can learn successful behavior, but the learned policy is not fully reliable. The agent's outcome remains strongly dependent on stochastic project acceptance, coalition formation, and early interactions with fixed-policy agents.
+
+\section{Behavioral Analysis Results}
+
+In addition to return-based performance metrics, the learned policy was analyzed at the level of individual action components. The goal of this analysis is to determine whether the agent learned interpretable behavioral patterns in project selection, effort allocation and collaboration decisions.
+
+\subsection{Project Selection Behavior}
+
+Since only one project is available per timestep, the \texttt{choose\_project} action does not represent a choice between multiple competing project alternatives. Instead, it is better interpreted as an accept/reject decision for the currently offered project.
+
+The analysis shows only weak differences between selected and rejected projects. Selected projects have marginally higher prestige, lower novelty, higher required effort and longer time windows. However, the derived \texttt{effort\_per\_time} metric is almost identical for selected and rejected projects, indicating that the agent does not clearly optimize for lower time pressure. Overall, project-level features only weakly explain the project selection behavior.
+
+\subsection{Effort Allocation Behavior}
+
+The \texttt{put\_effort} action determines whether the agent allocates effort to one of its currently running projects. The analysis focuses on whether the agent systematically allocates effort based on project-level features such as progress, remaining time, required effort, prestige, novelty or expected project quality.
+
+If the observed effort allocation is concentrated on specific project slots rather than on project properties, this indicates a potential slot bias in the learned policy. Such a bias would suggest that the agent reacts more strongly to the fixed position of a project in the observation vector than to the semantic content of the project itself.
+
+\subsection{Collaboration Behavior}
+
+The collaboration action is represented as a binary decision over observable peers. However, collaboration in the Game of Science environment is not unilateral. A collaboration only becomes effective if the selected peers make compatible decisions and if a valid coalition can be formed.
+
+The analysis compares selected and non-selected peers using features such as peer reputation, topic distance, peer availability and group membership. Weak or inconsistent differences between selected and non-selected peers would indicate that the agent did not learn a clear peer-selection strategy, or that the environment provides too noisy a signal for such a strategy to emerge reliably.
+
+\section{Behavioral Similarity Results}
+
+\subsection{Overall Similarity by Archetype}
+Table~\ref{tab:overall_archetype_similarity} reports the overall behavioral similarity between the \gls{ppo} agent and the three heuristic archetypes. The comparison is based on observations collected from \gls{ppo} evaluation trajectories and actions generated by the archetype policies for the same observations.
+
+\begin{table}[H]
+\centering
+\begin{tabular}{lrrrrrr}
+\hline
+Archetype & $n$ & Choose Project & Put Effort & Effort Diff. & Collab Cosine & Collab Count Diff. \\
+\hline
+\texttt{mass\_producer} & 7647 & 0.501 & 0.111 & 1.610 & 0.781 & -3.825 \\
+\texttt{orthodox\_scientist} & 7647 & 0.604 & 0.090 & 1.651 & 0.720 & -2.069 \\
+\texttt{careerist} & 7647 & 0.654 & 0.111 & 1.610 & 0.586 & 1.669 \\
+\hline
+\end{tabular}
+\caption{Overall behavioral similarity between the \gls{ppo} agent and the three archetype policies. Collaboration similarity is measured using cosine similarity only.}
+\label{tab:overall_archetype_similarity}
+\end{table}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=\textwidth]{figures/archetype_similarity_barplot.pdf}
+    \caption{Action-specific behavioral similarity between the \gls{ppo} agent and the heuristic archetypes.}
+    \label{fig:archetype_similarity_barplot}
+\end{figure}
+
+The similarity analysis shows that the \gls{ppo} agent does not clearly match a single archetype across all action components. For the \texttt{choose\_project} action, the highest agreement is observed with the \texttt{careerist} archetype. For collaboration behavior, the \gls{ppo} agent is most similar to the \texttt{mass\_producer}. Effort allocation remains weakly aligned with all archetypes.
+
+Overall, the \gls{ppo} agent appears to learn a hybrid behavior rather than copying one archetype.
+
+\section{Comparative Performance Results}
+
+\subsection{Training Performance}
+Training performance metrics include episode return over training steps, policy entropy, value function estimates, and training stability. \gls{ppo} demonstrates stable training with gradually increasing returns, while variance across seeds remains substantial.
+
+\subsection{Evaluation Performance}
+Evaluation performance is measured by episodic return, H-index, lifespan, and project completion rates. \gls{ppo} achieves competitive performance relative to fixed archetypes but exhibits high variance across evaluation runs.
+
+\subsection{Variance across Seeds}
+Variance across random seeds is substantial for all algorithms, indicating sensitivity to initial conditions, exploration trajectory, and stochastic environment dynamics. This confirms the necessity of multi-seed evaluation for reliable performance assessment.
+
+\section{Learning Dynamics}
+
+\subsection{Sample Efficiency}
+Sample efficiency is measured by the number of environment steps required to reach a given performance threshold. Model-based approaches are expected to achieve higher sample efficiency than model-free methods, but this advantage may be reduced in highly stochastic environments.
+
+\subsection{Stability of Training}
+Training stability is assessed through variance in episode return over consecutive training iterations. \gls{ppo} demonstrates relatively stable training, while asynchronous methods may exhibit higher short-term variance due to distributed experience collection.
+
+\subsection{Convergence Behavior}
+Convergence behavior is analyzed through policy entropy decay and value function stabilization. Complete convergence is not expected due to non-stationary environment dynamics and continuous population turnover.
+
+\section{Summary of Validation Results}
+
+The validation results demonstrate that reinforcement learning agents can learn non-trivial behavior in the Game of Science environment, but performance remains highly variable and sensitive to stochastic factors. \gls{ppo} achieves competitive performance relative to fixed heuristic baselines, particularly under the \texttt{evenly} reward scheme, but survival instability and high variance indicate that learned policies are not yet robust.
+
+Behavioral analysis reveals that learned strategies differ from fixed archetypes and exhibit hybrid characteristics. Project selection, effort allocation, and collaboration behavior show weak associations with observable features, suggesting that learned policies may rely partially on observational artifacts rather than semantically meaningful decision rules.
+
+%----------------------------------------------------------------------------------------
+% KAPITEL 7: AUSBLICK
+%----------------------------------------------------------------------------------------
+\chapter{Ausblick}
+
+\section{Summary of Main Findings}
+
+This thesis investigated reinforcement learning in the Game of Science environment by comparing model-free and model-based algorithms under controlled experimental conditions. The main findings are:
+
+\begin{itemize}
+    \item Reinforcement learning agents can learn non-trivial behavior in the Game of Science environment, achieving competitive performance relative to fixed heuristic baselines.
+    \item Learned policies exhibit high variance across training runs and evaluation seeds, indicating sensitivity to stochastic environment dynamics.
+    \item Behavioral analysis reveals hybrid strategies that differ from fixed archetypes but do not clearly optimize for observable project or peer features.
+    \item The main difficulty in learning appears to be the delayed and noisy reward signal rather than algorithm-specific limitations.
+\end{itemize}
+
+\section{Answers to the Research Questions}
+
+\subsection{RQ1: Learnability of the Environment}
+
+To what extent can reinforcement learning agents learn effective policies in a stochastic multi-agent environment with delayed and noisy rewards?
+
+The results demonstrate that reinforcement learning agents can learn policies that outperform some fixed heuristic baselines, particularly under certain reward schemes. However, performance remains highly variable, and learned policies are not fully robust. This indicates partial learnability: agents can exploit structure in the environment, but credit assignment remains difficult due to delayed rewards and stochastic outcomes.
+
+\subsection{RQ2: Comparison of \gls{ppo} and DreamerV3}
+
+How do the model-free algorithm \gls{ppo} and the model-based algorithm DreamerV3 compare in terms of learning performance, stability, and emergent strategies?
+
+\gls{ppo} demonstrates stable training with competitive performance, while DreamerV3 results were not fully available due to implementation challenges. The comparison remains incomplete, but preliminary results suggest that model-free approaches can achieve reasonable performance given sufficient training time and hyperparameter tuning.
+
+\subsection{RQ3: Emergent Behavioral Strategies}
+
+What behavioral strategies emerge from trained reinforcement learning agents, and how do they differ from predefined policy archetypes?
+
+Behavioral similarity analysis reveals that learned policies do not closely match any single archetype. \gls{ppo} exhibits hybrid behavior with project selection resembling the \texttt{careerist} and collaboration patterns closer to the \texttt{mass\_producer}. Effort allocation remains weakly aligned with all archetypes, suggesting that this action component is either difficult to learn or less important for reward accumulation.
+
+\section{Limitations and Unresolved Challenges}
+
+Several limitations remain:
+
+\begin{itemize}
+    \item Only a single learning agent was trained; multi-agent learning with multiple adaptive agents was not explored.
+    \item DreamerV3 results are incomplete due to implementation and convergence challenges.
+    \item Behavioral analysis is descriptive and does not establish causal relationships between actions and outcomes.
+    \item Full determinism could not be achieved despite extensive seeding efforts.
+\end{itemize}
+
+\section{Future Work}
+
+\subsection{Improved Reward Design}
+
+Future work could explore reward shaping techniques to provide more immediate feedback and reduce the temporal distance between actions and outcomes. Intermediate rewards for project progress or collaboration formation could strengthen the learning signal without fundamentally changing the environment structure.
+
+\subsection{Alternative Algorithms}
+
+Additional algorithms could be evaluated, including value-based methods, off-policy actor-critic approaches, and hierarchical reinforcement learning methods. Exploration strategies such as curiosity-driven learning or intrinsic motivation may also improve performance in sparse-reward settings.
+
+\subsection{Multi-Agent Reinforcement Learning Extensions}
+
+A natural extension would be to train multiple learning agents simultaneously and analyze emergent coordination or competition dynamics. This would require transitioning from single-agent to multi-agent reinforcement learning frameworks and addressing additional challenges such as non-stationarity from co-adaptation.
+
+\subsection{Generalization and Transfer Learning}
+
+Future work could investigate whether policies learned in one environment configuration generalize to different population sizes, reward schemes, or project dynamics. Transfer learning approaches could be used to adapt policies from simpler to more complex settings.
+
+\subsection{Interpretability and Explainability}
+
+Deeper analysis of learned representations and attention mechanisms could provide insights into which features drive decision-making. Visualization techniques and model interpretability methods could help identify whether policies rely on meaningful semantic features or exploit observational artifacts.
+
+\section{Final Remarks}
+
+This thesis demonstrates that reinforcement learning in complex multi-agent environments with delayed rewards remains challenging but not impossible. While learned policies do not yet achieve robust mastery, they exhibit non-trivial behavior that differs from fixed heuristics and adapts partially to environment dynamics. The insights gained from this work contribute to the understanding of reinforcement learning limitations and opportunities in realistic scientific collaboration settings.
+
+
+\bibliographystyle{ieeetr}
+\footnotesize\bibliography{references}
+
+
+
+%----------------------------------------------------------------------------------------
+%	APPENDIX
+%----------------------------------------------------------------------------------------
+\appendix
+
+\chapter{Anhänge}
+
+\section{Aufgabenstellung}
+% Hier die signierte Aufgabenstellung einfügen
+
+\section{Full Hyperparameter Tables}
+% Detaillierte Hyperparameter-Tabellen für alle Algorithmen
+
+\section{Additional Results}
+% Zusätzliche Ergebnisse und Visualisierungen
+
+\section{Implementation Details}
+% Implementierungsdetails, Code-Struktur, etc.
+
+\section{Supplementary Figures}
+% Ergänzende Abbildungen und Grafiken
+
+\chapter{Verzeichnisse}
+
+\glsaddallunused                                % add all unused items to glossary
+
+\end{document}
+

@@ -1,17 +1,6 @@
 """
-test_random_rewards.py
-
-Sparse-reward diagnostic that mirrors the PPO training setting exactly:
-  - agent_0 acts randomly (with action-mask awareness)
-  - all other agents follow the SAME fixed-policy archetypes as during training
-    (Balanced: 1/3 Careerist, 1/3 Orthodox, 1/3 Mass Producer)
-
-ALL pipeline counters and conditional probabilities are agent_0-only.
-Global env_metrics are shown separately for context but never mixed
-into the agent_0 analysis.
-
-Agent0Tracker tracks everything via Project-ID sets, with no dependency
-on fragile integer counters like agent_completed_projects.
+Sparse-reward diagnostic: agent_0 acts randomly, others follow fixed policies.
+Tracks agent_0 metrics using project-ID sets for robust analysis.
 """
 
 from __future__ import annotations
@@ -19,7 +8,6 @@ from __future__ import annotations
 import os
 import sys
 
-# Add the project root to sys.path so we can import from src/
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from typing import Any, Callable, Dict, List, Optional, Set
@@ -34,9 +22,6 @@ from src.agent_policies import (
 from src.env.env_versions.peer_group_environment_1 import PeerGroupEnvironment
 from src.rllib_single_agent_wrapper import RLLibSingleAgentWrapper
 
-# ═══════════════════════════════════════════════════════════════════════
-# Configuration  (matches train_ppo_rllib.py argparse defaults exactly)
-# ═══════════════════════════════════════════════════════════════════════
 TOTAL_STEPS: int = 10_000
 SEED: int = 42
 BATCH_SIZE: int = 32_000  # PPO train_batch_size (for expected-reward calc)

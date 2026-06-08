@@ -1,30 +1,6 @@
 """
-train_ppo_rllib.py
-
-Close in spirit to `run_policy_simulation.py`, but uses RLlib PPO to control
-ONE agent while the rest of the population follows fixed (hand-crafted) policies.
-
-Key similarities to run_policy_simulation.py:
-- You pick a policy distribution (careerist / orthodox_scientist / mass_producer)
-  for the *other* agents (fixed policies).
-- You configure the same environment knobs (n_agents, max_steps, n_groups, etc.).
-- You run "episodes" (rollouts) for a fixed horizon.
-
-Key differences:
-- RLlib PPO controls exactly one "controlled agent" (by default agent_0).
-- The wrapper handles:
-  - observation flattening (for RLlib encoders),
-  - macro-action encoding/decoding,
-  - action-mask repair,
-  - fixed policies for non-controlled agents.
-
-Install:
-  pip install "ray[rllib]" torch
-  # or
-  pip install "ray[rllib]" tensorflow
-
-Run:
-  python train_ppo_rllib.py --iterations 5 --policy-config Balanced
+Train PPO/APPO agent with RLlib to control one agent in multi-agent environment.
+Other agents follow fixed heuristic policies.
 """
 
 from __future__ import annotations
@@ -34,7 +10,6 @@ import math
 import os
 import sys
 
-# Add the project root to sys.path so we can import from src/
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 import csv
@@ -72,7 +47,6 @@ from src.checkpoint_utils import build_checkpoint_path
 os.environ["RAY_ACCEL_ENV_VAR_OVERRIDE_ON_ZERO"] = "0"
 os.environ["PYTHONWARNINGS"] = "ignore::DeprecationWarning"
 
-# Helper: safe float conversion
 def _safe_float(x: Any) -> float:
     try:
         if x is None:
@@ -85,7 +59,7 @@ def _safe_float(x: Any) -> float:
 
 
 def _first_not_none(*values: Any) -> Any:
-    """Return the first value that is not None. Unlike ``or``, preserves 0 and 0.0."""
+    """Return first non-None value."""
     for v in values:
         if v is not None:
             return v
@@ -93,13 +67,7 @@ def _first_not_none(*values: Any) -> Any:
 
 
 def wandb_sanitize(metrics: Dict[str, Any]) -> Dict[str, Any]:
-    """Return a WandB-safe copy of metrics.
-
-    - Keep only scalar ints/floats/bools.
-    - Drop None and NaN/Inf.
-    - Convert numpy scalar types to Python scalars if numpy is available.
-    - Ignore dict/list/array-like structures (e.g. histograms).
-    """
+    """Return WandB-safe copy: only scalar ints/floats/bools, drop None/NaN/Inf."""
 
     safe: Dict[str, Any] = {}
     for k, v in metrics.items():
@@ -131,15 +99,10 @@ def wandb_sanitize(metrics: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def resolve_checkpoint_path(save_result: Any) -> Optional[str]:
-    """Best-effort extraction of a filesystem path from PPOAlgo.save() result.
-
-    RLlib versions differ in what Algorithm.save() returns. This helper tries to
-    find a usable path without ever assuming that str(obj) is a real path.
-    """
+    """Extract filesystem path from Algorithm.save() result."""
     if save_result is None:
         return None
 
-    # Common: Checkpoint-like objects with a .path attribute
     if hasattr(save_result, "path"):
         path = getattr(save_result, "path", None)
         if path:
@@ -156,11 +119,9 @@ def resolve_checkpoint_path(save_result: Any) -> Optional[str]:
             if isinstance(cp, str):
                 return cp
 
-    # Direct string path
     if isinstance(save_result, str):
         return save_result
 
-    # Dict-like training result that contains checkpoint info
     if isinstance(save_result, dict):
         for key in ("checkpoint_path", "best_checkpoint", "checkpoint"):
             val = save_result.get(key)
@@ -171,22 +132,13 @@ def resolve_checkpoint_path(save_result: Any) -> Optional[str]:
             if isinstance(val, str):
                 return val
 
-    # Fallback: give up instead of returning a bogus path
     return None
 
 
 def extract_metrics(result: Dict[str, Any], iteration: int, prev_total_env_steps: int) -> tuple[Dict[str, Any], int]:
-    """Extract a flat metrics dict from an RLlib v2 training result.
-
-    Handles train/eval env_runners, learner stats, timers, perf, and
-    custom_metrics. Also computes a stable global step counter based on
-    timesteps_total (preferred) or num_env_steps_sampled_lifetime/this_iter.
-    """
+    """Extract flat metrics dict from RLlib training result."""
     metrics: Dict[str, Any] = {}
 
-    # --------------------
-    # Train env_runners
-    # --------------------
     train_env = result.get("env_runners", {}) or {}
 
     train_return_mean = train_env.get("episode_return_mean")
@@ -198,7 +150,6 @@ def extract_metrics(result: Dict[str, Any], iteration: int, prev_total_env_steps
     train_num_env_steps = train_env.get("num_env_steps_sampled")
     train_num_episodes = train_env.get("num_episodes")
 
-    # Timers inside env_runners (may or may not exist)
     train_env_timers = train_env.get("timers", {}) or {}
     env_step_timer = train_env_timers.get("env_step_timer")
     env_reset_timer = train_env_timers.get("env_reset_timer")
@@ -225,9 +176,6 @@ def extract_metrics(result: Dict[str, Any], iteration: int, prev_total_env_steps
         }
     )
 
-    # --------------------
-    # Evaluation env_runners
-    # --------------------
     eval_block = result.get("evaluation", {}) or {}
     eval_env = eval_block.get("env_runners", {}) or {}
 
@@ -1802,7 +1750,7 @@ if __name__ == "__main__":
         help="If set, uses lightweight observations for heuristic agents to speed up training.",
     )
 
-    parser.add_argument("--train-batch-size", type=int, default=1000,
+    parser.add_argument("--train-batch-size", type=int, default=10000,
                         help="Number of env steps collected per training iteration.")
 
     parser.add_argument("--vf-share-layers", action="store_true", default=True,
@@ -1818,7 +1766,7 @@ if __name__ == "__main__":
                         help="Path to a checkpoint to restore from.")
 
     # Parallelization settings
-    parser.add_argument("--num-workers", type=int, default=3,
+    parser.add_argument("--num-workers", type=int, default=5,
                         help="Number of RLlib rollout workers.")
     parser.add_argument("--num-envs-per-worker", type=int, default=1,
                         help="Number of environments per worker.")
@@ -1828,13 +1776,13 @@ if __name__ == "__main__":
                         help="Maximum number of environment steps to train (default: 1,000,000).")
 
     # RL training hyperparameters
-    parser.add_argument("--gamma", type=float, default=0.9594649595268422)
+    parser.add_argument("--gamma", type=float, default=0.9583432181048404)
     parser.add_argument("--lambda", dest="lambda_", type=float, default=0.9626992994491804)
-    parser.add_argument("--lr", type=float, default=0.0001666285629775726)
+    parser.add_argument("--lr", type=float, default=0.00020375077263171516)
     parser.add_argument("--num-epochs", type=int, default=3)
-    parser.add_argument("--entropy-coeff", type=float, default=0.005259081226297787)
-    parser.add_argument("--vf-loss-coeff", type=float, default=1.950465663697185)
-    parser.add_argument("--grad-clip", type=float, default=0.5045709931687762)
+    parser.add_argument("--entropy-coeff", type=float, default=0.005515494202562797)
+    parser.add_argument("--vf-loss-coeff", type=float, default=1.941963717117803)
+    parser.add_argument("--grad-clip", type=float, default=0.5223688871667344)
 
     # APPO-specific hyperparameters
     parser.add_argument("--vtrace", action="store_true", default=True,

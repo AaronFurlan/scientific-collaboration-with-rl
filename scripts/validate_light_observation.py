@@ -1,15 +1,4 @@
-"""
-Validation script for PeerGroupEnvironment lightweight observations.
-
-Verifies that _get_policy_observation produced identical decisions for fixed 
-archetype policies compared to the full _get_observation.
-
-Recommended fast command:
-python scripts/validate_light_observation.py --num-seeds 5 --max-steps 200 --step-stride 5 --agent-sample-size 10
-
-Stricter command:
-python scripts/validate_light_observation.py --num-seeds 10 --max-steps 600 --step-stride 1 --agent-sample-size -1
-"""
+"""Validate that lightweight observations produce identical policy decisions as full observations."""
 import os
 import sys
 import math

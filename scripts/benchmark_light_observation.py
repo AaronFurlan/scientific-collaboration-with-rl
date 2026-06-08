@@ -1,11 +1,4 @@
-"""
-Benchmarking script for PeerGroupEnvironment lightweight observations.
-
-Compares environment step time with and without the use_light_policy_obs optimization.
-
-Recommended command:
-python scripts/benchmark_light_observation.py --num-seeds 5 --steps-per-seed 300
-"""
+"""Benchmark PeerGroupEnvironment with/without lightweight observation optimization."""
 import os
 import sys
 import time

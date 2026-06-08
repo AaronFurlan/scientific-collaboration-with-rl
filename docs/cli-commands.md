@@ -42,9 +42,9 @@ python .\scripts\train_rl_agent.py --iterations 100 --seed 1 --wandb-group "Defa
 python .\scripts\train_rl_agent.py --iterations 39 --seed 1 --wandb-group "Default_Setup1" --wandb-run-id "eiy14h2k" --checkpoint "checkpoints/26-04-2026/balanced_by_effort_iter0069_mrl50_eiy14h2k_26-04-06-23_eval12.35_periodic" --use-light-policy-obs 
 ```
 
-## Testing
+## Evaluations
 ```bash
-python .\scripts\test_rl_agent.py --num-seeds 20 --checkpoint "checkpoints/23-04-2026/balanced_by_effort_iter0099_mrl50_23-04-11-18_eval_na_periodic" --output-prefix "rl_agent_sim_config1_trainseed1" --all-rewards
+python .\scripts\eval_rl_agent.py --output-dir "test_results/ppo_exp2" --output-prefix "ppo_exp2" --checkpoint "checkpoints/PPO_checkpoints/ppo_balanced_by_effort_iter0099_mrl50_vsy7vsv9_14-05-07-22_eval_na_periodic_seed5" --algo "PPO" --num-seeds 20 --seed 501 --reward-function "by_effort"
 ```
 
 ## Aggregate Actions and Observations for counterfactual analysis

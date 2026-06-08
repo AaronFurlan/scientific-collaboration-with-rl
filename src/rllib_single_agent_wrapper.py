@@ -1,27 +1,11 @@
 """
-rllib_single_agent_wrapper.py
+Single-agent Gymnasium wrapper for RLlib around PettingZoo ParallelEnv.
 
-Single-agent Gymnasium wrapper around a PettingZoo ParallelEnv that:
-
-1) Exposes one controlled agent through a standard Gymnasium API.
-2) Uses a multi-head Dict action space:
-   {"choose_project": Discrete, "put_effort": Discrete, "collaborate_with": MultiDiscrete}
-3) Decodes and repairs actions using the env-provided action masks.
-4) Supports fixed policies for all non-controlled agents.
-5) Optionally applies a top-k collaboration ablation.
-6) Flattens nested observations into a stable 1D float32 vector for RLlib.
-7) Re-encodes running project slots into a compact, slot-stable representation.
-
-Observation design for running project slots:
-- explicit activity flag (`is_active`)
-- progress features (`current_effort`, `remaining_effort`, `progress_ratio`)
-- urgency features (`time_left`, `urgency`)
-- project quality features (`prestige`, `novelty`, optional `societal_value`)
-- summarized collaboration features instead of raw peer vectors
-- explicit slot identity features (`slot_index`, normalized index, one-hot)
-
-This keeps the flattened observation size stable across steps and makes empty vs.
-active project slots semantically distinguishable.
+Features:
+- Exposes one controlled agent via standard Gymnasium API
+- Multi-head Dict action space with action mask repair
+- Stable 1D float32 observation vector with slot-based encoding
+- Optional top-k collaboration constraint
 """
 
 from __future__ import annotations
@@ -73,31 +57,14 @@ class RLLibSingleAgentWrapper(gym.Env):
             debug_effort_agent_only: bool = True,
             env_config: Optional[Dict[str, Any]] = None,
     ):
-        """Wrapper around a multi-agent env exposing a single-agent RLlib interface.
-
+        """
         Args:
-            env: PettingZoo ParallelEnv (your PeerGroupEnvironment)
-            controlled_agent: None -> pick first agent each reset,
-                              str -> fixed agent id,
-                              callable -> choose agent given observations dict.
-            other_policies: dict(agent_id -> callable(nested_obs)-> action_dict)
-                           For non-controlled agents.
-            force_episode_horizon: if set, wrapper truncates after this many steps
-                                  (guarantees RLlib gets episodes).
-            strict_space_check: if True, run a runtime space.contains() check on reset/step observations
-                               (useful for debugging; can be slow).
-            topk_collab: If set to an int k, enforce that at most k collaboration
-                partners are selected per step, based on a score derived from the
-                agent's observation. If None, no top-k ablation is applied.
-            topk_mode: Reserved for future modes. Currently only "score" is
-                supported, which uses reputation, distance, and same-group bonus.
-            topk_seed: Seed used for deterministic tie-breaking when multiple
-                peers share the same score.
-            topk_apply_to_all_agents: If True, apply the top-k constraint also
-                to non-controlled agents (both policy-driven and random actions).
-            w_rep / w_dist / w_same: Weights for the reputation, distance, and
-                same-group components of the collaboration score.
-            env_config: Optional RLlib env_config passed to the wrapper.
+            env: PettingZoo ParallelEnv
+            controlled_agent: None (auto), str (fixed ID), or callable
+            other_policies: Dict mapping agent_id -> policy function
+            force_episode_horizon: Max steps before truncation
+            topk_collab: Max collaboration partners (None = unlimited)
+            w_rep/w_dist/w_same: Collaboration scoring weights
         """
         super().__init__()
         self.env = env
@@ -139,7 +106,6 @@ class RLLibSingleAgentWrapper(gym.Env):
         self._project_slot_mapping: Dict[str, int] = {}
         self._slot_to_project: List[Optional[str]] = [None] * self.env.max_projects_per_agent
 
-        # One-time debug dump for first reset observations.
         self._obs_dump_written: bool = False
         self._obs_dump_path: Path = Path("log") / "obs_dump_first_reset.txt"
         self._printed_obs_size_debug: bool = False
@@ -160,19 +126,10 @@ class RLLibSingleAgentWrapper(gym.Env):
         if self._ref_agent is None:
             raise ValueError("env.possible_agents is missing/empty; cannot select ref agent.")
 
-        # ---- Multi-head action-space (Dict) ----
-        # These attributes exist in your PeerGroupEnvironment
+        # Multi-head action-space (Dict)
         self._CP = int(self.env.n_projects_per_step + 1)  # choose_project
         self._PE = int(self.env.max_projects_per_agent + 1)  # put_effort
-        self._CB = int(self.env.max_peer_group_size)  # collaborate bits (max_peer_slots)
-
-        # Define action spaces that match the environment
-        # RLlib will automatically create separate heads for each component
-        # choose_project: Discrete(0, 1, 2, ...)
-        # put_effort: Discrete(0, 1, 2, ..., 8)
-        # collaborate_with: MultiDiscrete([2, 2, ..., 2]) for binary collaboration intent
-        #   Note: Using MultiDiscrete instead of MultiBinary for RLlib compatibility
-        #   Each element can be 0 (no collaboration) or 1 (collaborate)
+        self._CB = int(self.env.max_peer_group_size)  # collaborate bits
         self.action_space = gym.spaces.Dict({
             "choose_project": gym.spaces.Discrete(self._CP),
             "put_effort": gym.spaces.Discrete(self._PE),
@@ -180,14 +137,11 @@ class RLLibSingleAgentWrapper(gym.Env):
         })
 
 
-        # ---- Build stable observation template from env.observation_space ----
-        # We need the env's observation_space(agent) which corresponds to the "observation" part.
-        # The nested obs is {"observation": <that dict>, "action_mask": <mask dict>}.
+        # Build stable observation template from env.observation_space
         obs_space = None
         try:
             obs_space = self.env.observation_space(self._ref_agent)
         except Exception:
-            # Some envs only build stable spaces after reset
             try:
                 self.env.reset(seed=0)
                 obs_space = self.env.observation_space(self._ref_agent)
@@ -196,11 +150,7 @@ class RLLibSingleAgentWrapper(gym.Env):
 
         self._env_obs_space = obs_space  # may be None
 
-        # Build deterministic templates for stable flattening
-        # The template is derived from observation_space and defines the full feature structure
-        # with all 8 project slots. At runtime, observations may have fewer projects (0-8),
-        # and RLlib automatically handles padding/truncating the observation vector.
-
+        # Build deterministic templates for stable flattening with all project slots
         if obs_space is not None:
             raw_obs_template = self._zeros_from_space(obs_space)
             self._mask_template = {
@@ -208,29 +158,13 @@ class RLLibSingleAgentWrapper(gym.Env):
                 "collaborate_with": np.zeros(self.env.max_peer_group_size, dtype=np.int8),
                 "put_effort": np.zeros(self.env.max_projects_per_agent + 1, dtype=np.int8),
             }
-            # Normalize template to get correct structure with ALL slots
             self._obs_template = self._create_normalized_obs_template(raw_obs_template)
-
-            # Create sample vector - pass a flag to _flatten_to_vector to indicate this is a template
             nested_template = {"observation": self._obs_template, "action_mask": self._mask_template, "_is_template": True}
             sample_vec = self._flatten_to_vector(nested_template)
         else:
             raise RuntimeError("Cannot create template: observation_space is None")
-            nested_template = {"observation": self._obs_template, "action_mask": self._mask_template, "_is_template": True}
-            sample_vec = self._flatten_to_vector(nested_template)
-            self._obs_template = self._deep_copy_numeric(nested.get("observation", {}))
-            self._mask_template = self._deep_copy_numeric(nested.get("action_mask", {}))
-            # Normalize template BEFORE flattening
-            normalized_obs_template = self._create_normalized_obs_template(self._obs_template)
-            # Use the normalized template for all future flattening operations
-            self._obs_template = normalized_obs_template
-            sample_vec = self._flatten_to_vector(
-                {"observation": normalized_obs_template, "action_mask": self._mask_template})
 
-        # Set observation_space
-        # IMPORTANT: Use the ACTUAL flattened size from sample_vec
-        # This is the real size that _flatten_to_vector() produces at runtime
-        # NOT the template-based size which can differ when running_projects normalization changes sizes
+        # Set observation_space using actual flattened size from sample_vec
         self.observation_space = Box(
             low=-np.inf,
             high=np.inf,
@@ -238,10 +172,7 @@ class RLLibSingleAgentWrapper(gym.Env):
             dtype=np.float32,
         )
 
-        # Set expected_obs_size ONCE during initialization - NEVER change it later!
         self.expected_obs_size = int(sample_vec.size)
-
-        # Don't overwrite last observations here; caller will call reset() before stepping.
         self._last_observations = {}
         self.current_controlled = self._ref_agent
 
@@ -265,7 +196,6 @@ class RLLibSingleAgentWrapper(gym.Env):
             put_effort = int(a.get("put_effort", 0))
             collab = a.get("collaborate_with", np.zeros(self._CB, dtype=np.int8))
 
-            # Convert to binary integer array and clip to ensure valid values
             collab_bits = np.asarray(collab, dtype=np.int8)
             collab_bits = np.clip(collab_bits, 0, 1)
 
@@ -311,10 +241,7 @@ class RLLibSingleAgentWrapper(gym.Env):
         }
 
     def decode_action_id(self, action_id: Any) -> Dict[str, Any]:
-        """Public API: decode an action into a human-readable dict.
-
-        Now supports both dict actions and legacy integer IDs.
-        """
+        """Decode action into human-readable dict."""
         decoded = self._decode_action(action_id)
         collab = decoded["collaborate_with"]
         return {
@@ -326,7 +253,7 @@ class RLLibSingleAgentWrapper(gym.Env):
 
     def _apply_action_mask(self, decoded: ActionDict, nested_obs: NestedObs,
                            agent_id: Optional[str] = None) -> ActionDict:
-        """Repair invalid actions using the env-provided action_mask.
+        """Repair invalid actions using action_mask.
         """
         mask = nested_obs.get("action_mask", {})
         if not isinstance(mask, dict):
@@ -361,7 +288,6 @@ class RLLibSingleAgentWrapper(gym.Env):
             allowed = (c_mask > 0)
             L = min(len(c), len(allowed))
             
-            # Use slice to modify in-place if possible, but keep it safe
             c_slice = c[:L]
             allowed_slice = allowed[:L]
             c_slice[~allowed_slice] = 0
@@ -369,10 +295,9 @@ class RLLibSingleAgentWrapper(gym.Env):
 
             if len(c) > L:
                 c[L:] = 0
-            
-            # Optional top-k ablation (after mask repair)
+
+            # Optional top-k ablation after mask repair
             if hasattr(self, "topk_collab") and self.topk_collab is not None and self.topk_collab >= 0:
-                # Only apply to controlled agent or optionally to all agents
                 if agent_id is None or getattr(self, "topk_apply_to_all_agents", False):
                     c = self._apply_topk_collaboration(
                         c,

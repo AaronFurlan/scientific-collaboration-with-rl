@@ -1,25 +1,6 @@
 """
-run_policy_simulation_with_rlagent.py
-
-Runs the PeerGroupEnvironment simulation with a trained RLlib PPO checkpoint
-controlling agent_0, while all other agents follow fixed heuristic policies.
-
-Closely mirrors run_policy_simulation.py but replaces agent_0's heuristic
-policy with the trained RL policy loaded from a checkpoint (default: models/).
-
-Architecture:
-    - The RLLibSingleAgentWrapper is used as a helper for observation
-      flattening, macro-action decoding, action-mask repair, and top-k
-      collaboration — exactly the same utilities used during training.
-    - The restored RLlib algorithm's RLModule produces action logits via
-      forward_inference(), which we decode into environment actions.
-    - We maintain a reference to the *unwrapped* environment for full
-      multi-agent logging visibility (observations, actions, projects, stats).
-
-Usage:
-    python run_policy_simulation_with_rlagent.py
-    python run_policy_simulation_with_rlagent.py --checkpoint checkpoints/ --seed 42
-    python run_policy_simulation_with_rlagent.py --policy-config Balanced --reward-function by_effort
+Evaluate trained RLlib agent (PPO/APPO) in multi-agent environment.
+One agent uses trained checkpoint, others follow heuristic policies.
 """
 
 from __future__ import annotations
@@ -28,8 +9,8 @@ import argparse
 import json
 import os
 import sys
+import pickle as _pickle
 
-# Add the project root to sys.path so we can import from src/
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 import gymnasium as gym
@@ -55,9 +36,6 @@ from scripts.log_simulation import SimLog
 from src.stats_tracker import SimulationStats
 
 
-# ---------------------------------------------------------------------------
-# Policy configs — shared with run_policy_simulation.py / train_ppo_rllib.py
-# ---------------------------------------------------------------------------
 POLICY_CONFIGS: Dict[str, Dict[str, float]] = {
     "All Careerist": {"careerist": 1.0, "orthodox_scientist": 0.0, "mass_producer": 0.0},
     "All Orthodox": {"careerist": 0.0, "orthodox_scientist": 1.0, "mass_producer": 0.0},
@@ -68,17 +46,12 @@ POLICY_CONFIGS: Dict[str, Dict[str, float]] = {
     "Mass Producer Heavy": {"careerist": 0.5, "orthodox_scientist": 0.0, "mass_producer": 0.5},
 }
 
-
-# ---------------------------------------------------------------------------
-# Centralized config — single source of truth for all parameters
-# ---------------------------------------------------------------------------
 @dataclass
 class EvalConfig:
-    """All parameters for a single evaluation run.
+    """Parameters for evaluation run. [must-match-training] params must match training config."""
 
-    Parameters marked [must-match-training] must be identical to the values
-    used during PPO training; a mismatch will silently produce wrong results.
-    """
+    # Algorithm
+    algo: str = "PPO"
 
     # Checkpoint
     checkpoint_path: str = "checkpoints"
@@ -90,7 +63,7 @@ class EvalConfig:
     max_steps: Optional[int] = 600
     max_rewardless_steps: Optional[int] = 100
     n_groups: Optional[int] = 4
-    max_peer_group_size: Optional[int] = 60       # ← macro-action size depends on this
+    max_peer_group_size: Optional[int] = 40
     n_projects_per_step: Optional[int] = 1
     max_projects_per_agent: Optional[int] = 6
     max_agent_age: Optional[int] = 1000
@@ -147,6 +120,7 @@ class EvalConfig:
         print(f"\n{'='*60}")
         print("EVALUATION CONFIG")
         print(f"{'='*60}")
+        print(f"  algorithm:           {self.algo}")
         print(f"  checkpoint:          {self.checkpoint_path}")
         print(f"  seed:                {self.seed}")
         print(f"  deterministic:       {self.deterministic}")
@@ -205,6 +179,32 @@ class EvalConfig:
                 if val != old_val:
                     setattr(self, attr_name, val)
                     updated.append(f"{attr_name}: {old_val} -> {val}")
+
+
+# ---------------------------------------------------------------------------
+# Algorithm factory
+# ---------------------------------------------------------------------------
+
+def get_algorithm_config(algo: str):
+    """Factory function to get algorithm config class based on algorithm name.
+
+    Args:
+        algo: Algorithm name ("PPO" or "APPO")
+
+    Returns:
+        AlgorithmConfig instance for the specified algorithm
+
+    Raises:
+        ValueError: If algorithm is not supported
+    """
+    if algo == "PPO":
+        from ray.rllib.algorithms.ppo import PPOConfig
+        return PPOConfig()
+    elif algo == "APPO":
+        from ray.rllib.algorithms.appo import APPOConfig
+        return APPOConfig()
+    else:
+        raise ValueError(f"Unsupported algorithm: {algo}. Allowed values: ['PPO', 'APPO']")
 
 
 # ---------------------------------------------------------------------------
@@ -809,46 +809,292 @@ def run_simulation_with_rl_agent(cfg: EvalConfig) -> dict:
         else:
              cfg.expected_obs_size = expected_obs_size
 
+    # Fix checkpoint path references if needed (for portability across systems)
+    rllib_checkpoint_json_path = os.path.join(checkpoint_path, "rllib_checkpoint.json")
+    if os.path.exists(rllib_checkpoint_json_path):
+        try:
+            with open(rllib_checkpoint_json_path, "r") as f:
+                checkpoint_meta = json.load(f)
+
+            # Check if state_file has an absolute path that doesn't exist
+            state_file = checkpoint_meta.get("state_file", "")
+            if state_file and os.path.isabs(state_file) and not os.path.exists(state_file):
+                print(f"[INFO] Fixing checkpoint metadata: old state_file path = {state_file}")
+                # Replace with relative path
+                checkpoint_meta["state_file"] = "algorithm_state.pkl"
+
+                # Write back the corrected metadata
+                with open(rllib_checkpoint_json_path, "w") as f:
+                    json.dump(checkpoint_meta, f, indent=2)
+                print(f"[INFO] Updated state_file to: algorithm_state.pkl")
+        except Exception as e:
+            print(f"[WARN] Could not fix checkpoint metadata: {e}")
+
     # Try to load algorithm from checkpoint
     try:
         algo = Algorithm.from_checkpoint(checkpoint_path)
         print("Algorithm restored successfully.")
 
+        # Disable training for evaluation (especially important for APPO)
+        # APPO has background learner threads that need to be stopped
+        if cfg.algo == "APPO":
+            try:
+                # For APPO, stop the learner thread to prevent timeout errors
+                if hasattr(algo, 'learner_thread') and algo.learner_thread is not None:
+                    algo.learner_thread.stopped = True
+                    # Join with timeout to properly terminate the thread
+                    algo.learner_thread.join(timeout=2.0)
+                    print("[INFO] Stopped APPO learner thread for evaluation")
+            except Exception as e:
+                print(f"[WARN] Could not stop APPO learner thread: {e}")
+
         # Sync Environment Config from Checkpoint
         cfg.update_from_algorithm_config(algo.config.to_dict())
-    except (AttributeError, TypeError, ModuleNotFoundError, ImportError) as e:
+    except (AttributeError, TypeError, ModuleNotFoundError, ImportError, _pickle.UnpicklingError, RuntimeError, ValueError) as e:
         print(f"[WARN] Could not load algorithm from checkpoint: {e}")
-        print("[INFO] Using default configuration values from script")
+        print(f"[INFO] Using default {cfg.algo} configuration values from script")
 
         # Build algorithm from scratch using the config we have
-        from ray.rllib.algorithms.ppo import PPOConfig
+        algo_config = get_algorithm_config(cfg.algo)
 
-        # Create a basic PPO config with OLD API stack to match checkpoint
-        algo_config = PPOConfig()
+        # Create a basic config with OLD API stack to match checkpoint
         algo_config = algo_config.api_stack(
             enable_rl_module_and_learner=False,
             enable_env_runner_and_connector_v2=False
         )
         algo_config = algo_config.environment(env=env_name)
 
+        # For APPO, configure for evaluation mode (minimal resources, no training)
+        if cfg.algo == "APPO":
+            # Use OLD API stack compatible configuration
+            # Don't try to disable training completely, just minimize resources
+            print("[INFO] Configured APPO for evaluation mode")
+
         # Try to restore just the model weights if possible
         try:
             algo = algo_config.build()
 
-            # Attempt to restore model weights manually by loading state dict
+            # For APPO, ensure learner thread is stopped after build
+            if cfg.algo == "APPO" and hasattr(algo, 'learner_thread') and algo.learner_thread is not None:
+                algo.learner_thread.stopped = True
+                # Join with timeout to properly terminate the thread
+                algo.learner_thread.join(timeout=2.0)
+                print("[INFO] Stopped APPO learner thread after build")
+
+            # Attempt to restore model weights manually
+            print("[INFO] Attempting to restore model weights from checkpoint...")
+            print(f"[DEBUG] Checkpoint directory: {checkpoint_path}")
+
+            # List checkpoint contents for debugging
+            if os.path.exists(checkpoint_path):
+                checkpoint_files = os.listdir(checkpoint_path)
+                print(f"[DEBUG] Checkpoint contains: {checkpoint_files}")
+
+            # Try different checkpoint formats
             state_file = os.path.join(checkpoint_path, "algorithm_state.pkl")
-            if os.path.exists(state_file):
-                print("[INFO] Attempting to restore model weights from checkpoint...")
-                # Note: This will likely fail due to missing 'callbacks' module
-                # but we try anyway in case the issue is resolved
-                import pickle
-                with open(state_file, "rb") as f:
-                    state = pickle.load(f)
-                # Restore only the weights, not the full config
-                if "worker" in state:
-                    print("[INFO] Restoring model weights from checkpoint")
-                    algo.__setstate__(state)
-                print("[INFO] Algorithm initialized with default config and checkpoint weights")
+            policies_dir = os.path.join(checkpoint_path, "policies")
+            rllib_checkpoint_json = os.path.join(checkpoint_path, "rllib_checkpoint.json")
+
+            weights_loaded = False
+
+            # Method 1: Try using restore_from_object (new RLlib API)
+            if os.path.exists(rllib_checkpoint_json):
+                try:
+                    # This is a new-style checkpoint with rllib_checkpoint.json
+                    from ray.rllib.algorithms.algorithm import Algorithm as RLlibAlgorithm
+                    print("[INFO] Trying to restore using Algorithm.restore_from_object()...")
+
+                    # Read the checkpoint metadata
+                    with open(rllib_checkpoint_json, "r") as f:
+                        checkpoint_data = json.load(f)
+
+                    # Try to restore just the policy weights
+                    policy = algo.get_policy()
+                    if hasattr(policy, 'restore_from_object'):
+                        policy.restore_from_object(checkpoint_path)
+                        weights_loaded = True
+                        print("[INFO] Loaded model weights using restore_from_object (new API)")
+                except Exception as e:
+                    print(f"[WARN] Could not load using restore_from_object: {e}")
+
+            # Method 2: Try loading from policies directory (new format)
+            if not weights_loaded and os.path.exists(policies_dir):
+                try:
+                    import pickle
+                    print(f"[DEBUG] Exploring policies directory...")
+
+                    # List contents of policies directory
+                    policies_contents = os.listdir(policies_dir)
+                    print(f"[DEBUG] Policies directory contains: {policies_contents}")
+
+                    default_policy_path = os.path.join(policies_dir, "default_policy")
+                    if os.path.exists(default_policy_path):
+                        policy_contents = os.listdir(default_policy_path)
+                        print(f"[DEBUG] default_policy contains: {policy_contents}")
+
+                        # Try different file names
+                        possible_files = [
+                            "policy_state.pkl",
+                            "rllib_checkpoint.json",
+                            "policy_state.json",
+                        ]
+
+                        for filename in possible_files:
+                            policy_state_file = os.path.join(default_policy_path, filename)
+                            if os.path.exists(policy_state_file):
+                                print(f"[INFO] Found {filename}, attempting to load...")
+
+                                if filename.endswith('.pkl'):
+                                    # Try different pickle loading methods
+                                    policy_state = None
+                                    load_errors = []
+
+                                    # Method 0: Check if cloudpickle is needed (from rllib_checkpoint.json)
+                                    use_cloudpickle = False
+                                    checkpoint_json_path = os.path.join(default_policy_path, "rllib_checkpoint.json")
+                                    if os.path.exists(checkpoint_json_path):
+                                        try:
+                                            with open(checkpoint_json_path, "r") as f:
+                                                checkpoint_meta = json.load(f)
+                                            if checkpoint_meta.get("format") == "cloudpickle":
+                                                use_cloudpickle = True
+                                                print(f"[INFO] Detected cloudpickle format from checkpoint metadata")
+                                        except Exception:
+                                            pass
+
+                                    # Method 1: Try cloudpickle if detected
+                                    if use_cloudpickle and policy_state is None:
+                                        try:
+                                            import cloudpickle
+                                            with open(policy_state_file, "rb") as f:
+                                                policy_state = cloudpickle.load(f)
+                                            print(f"[INFO] Loaded with cloudpickle.load()")
+                                        except Exception as e0:
+                                            load_errors.append(f"Cloudpickle: {e0}")
+
+                                    # Method 2: Standard pickle load
+                                    if policy_state is None:
+                                        try:
+                                            with open(policy_state_file, "rb") as f:
+                                                policy_state = pickle.load(f)
+                                            print(f"[INFO] Loaded with standard pickle.load()")
+                                        except Exception as e1:
+                                            load_errors.append(f"Standard: {e1}")
+
+                                    # Method 2: Try with different encoding
+                                    if policy_state is None:
+                                        try:
+                                            with open(policy_state_file, "rb") as f:
+                                                policy_state = pickle.load(f, encoding='latin1')
+                                            print(f"[INFO] Loaded with encoding='latin1'")
+                                        except Exception as e2:
+                                            load_errors.append(f"Latin1: {e2}")
+
+                                    # Method 3: Try with fix_imports
+                                    if policy_state is None:
+                                        try:
+                                            with open(policy_state_file, "rb") as f:
+                                                policy_state = pickle.load(f, fix_imports=True)
+                                            print(f"[INFO] Loaded with fix_imports=True")
+                                        except Exception as e3:
+                                            load_errors.append(f"FixImports: {e3}")
+
+                                    # Method 4: Try torch.load (maybe it's a PyTorch checkpoint)
+                                    if policy_state is None:
+                                        try:
+                                            # PyTorch 2.6+ requires weights_only=False for older checkpoints
+                                            policy_state = torch.load(policy_state_file, map_location='cpu', weights_only=False)
+                                            print(f"[INFO] Loaded with torch.load(weights_only=False)")
+                                        except Exception as e4:
+                                            load_errors.append(f"Torch: {e4}")
+
+                                    # Method 5: Try to read raw bytes and extract PyTorch state_dict
+                                    if policy_state is None:
+                                        try:
+                                            print(f"[INFO] Trying to extract PyTorch state_dict from raw checkpoint...")
+                                            # Read the file as raw bytes
+                                            with open(policy_state_file, "rb") as f:
+                                                raw_data = f.read()
+
+                                            print(f"[DEBUG] File size: {len(raw_data)} bytes")
+
+                                            # Try to find PyTorch magic number in the file
+                                            # PyTorch files often start with specific magic bytes
+                                            if b'PK' in raw_data[:10]:  # ZIP archive (PyTorch >= 1.6)
+                                                print(f"[INFO] Detected ZIP-based PyTorch format")
+                                                import zipfile
+                                                import io
+
+                                                # Try to load as ZIP
+                                                zip_buffer = io.BytesIO(raw_data)
+                                                with zipfile.ZipFile(zip_buffer, 'r') as z:
+                                                    file_list = z.namelist()
+                                                    print(f"[DEBUG] ZIP contains: {file_list[:10]}")
+
+                                                    # Look for common PyTorch checkpoint files
+                                                    for name in ['data.pkl', 'model.pth', 'state_dict.pth']:
+                                                        if name in file_list:
+                                                            print(f"[INFO] Found {name} in ZIP, extracting...")
+                                                            with z.open(name) as model_file:
+                                                                policy_state = torch.load(io.BytesIO(model_file.read()),
+                                                                                        map_location='cpu',
+                                                                                        weights_only=False)
+                                                            if policy_state:
+                                                                print(f"[INFO] Successfully loaded from {name}")
+                                                                break
+                                        except Exception as e5:
+                                            load_errors.append(f"RawExtract: {e5}")
+
+                                    if policy_state is None:
+                                        print(f"[ERROR] All pickle loading methods failed:")
+                                        for err in load_errors:
+                                            print(f"  - {err}")
+                                        continue
+
+                                    print(f"[DEBUG] Loaded policy_state type: {type(policy_state)}")
+                                    print(f"[DEBUG] Policy state keys: {policy_state.keys() if isinstance(policy_state, dict) else 'not a dict'}")
+
+                                    # Get the policy and restore weights
+                                    policy = algo.get_policy()
+
+                                    # Try different restore methods
+                                    if hasattr(policy, 'set_state'):
+                                        policy.set_state(policy_state)
+                                        weights_loaded = True
+                                        print("[INFO] Loaded model weights using policy.set_state()")
+                                    elif hasattr(policy, 'set_weights') and 'weights' in policy_state:
+                                        policy.set_weights(policy_state['weights'])
+                                        weights_loaded = True
+                                        print("[INFO] Loaded model weights using policy.set_weights()")
+                                    else:
+                                        print(f"[WARN] Policy has no set_state or set_weights method")
+                                        print(f"[DEBUG] Policy methods: {[m for m in dir(policy) if not m.startswith('_')][:20]}")
+
+                                if weights_loaded:
+                                    break
+                except Exception as e:
+                    import traceback
+                    print(f"[WARN] Could not load from policies directory: {e}")
+                    print(f"[DEBUG] Traceback: {traceback.format_exc()}")
+
+            # Method 3: Try loading from algorithm_state.pkl (old format)
+            if not weights_loaded and os.path.exists(state_file):
+                try:
+                    import pickle
+                    with open(state_file, "rb") as f:
+                        state = pickle.load(f)
+                    # Restore only the weights, not the full config
+                    if isinstance(state, dict) and "worker" in state:
+                        print("[INFO] Restoring model weights from algorithm_state.pkl")
+                        algo.__setstate__(state)
+                        weights_loaded = True
+                except Exception as e:
+                    print(f"[WARN] Could not load from algorithm_state.pkl: {e}")
+
+            if weights_loaded:
+                print("[INFO] Algorithm initialized with checkpoint weights")
+            else:
+                print("[WARN] Could not load checkpoint weights, using random initialization")
         except Exception as restore_error:
             print(f"[WARN] Could not restore model weights: {restore_error}")
             print("[INFO] Creating fresh algorithm with default config (no checkpoint weights)")
@@ -903,7 +1149,7 @@ def run_simulation_with_rl_agent(cfg: EvalConfig) -> dict:
 
     dist_counts = dict(zip(*np.unique(agent_policies, return_counts=True)))
     print(f"Agent policy distribution: {dist_counts}")
-    print(f"Controlled agent: {cfg.controlled_agent_id} -> RL Policy (PPO)")
+    print(f"Controlled agent: {cfg.controlled_agent_id} -> RL Policy ({cfg.algo})")
 
     # ---- 4) Build helper wrapper for obs flattening & action decoding ----
     # The wrapper uses the same RLLibSingleAgentWrapper class and identical
@@ -953,12 +1199,11 @@ def run_simulation_with_rl_agent(cfg: EvalConfig) -> dict:
         agent_id=cfg.controlled_agent_id,
         agent_idx=env.agent_to_id[cfg.controlled_agent_id],
     )
+    # Initial snapshot for step 0 logging
+    rl_status.snapshot(env)
     eval_obs_debug_printed = False
 
     for step in range(cfg.max_steps):
-        # ---- Snapshot RL agent state BEFORE stepping ----
-        rl_status.snapshot(env)
-
         actions = {}
         for agent in env.agents:
             agent_idx = env.agent_to_id[agent]
@@ -1043,9 +1288,19 @@ def run_simulation_with_rl_agent(cfg: EvalConfig) -> dict:
                     # Extract action components for debug display
                     choose_project = decoded.get('choose_project', 0) if isinstance(decoded, dict) else 0
                     put_effort = decoded.get('put_effort', 0) if isinstance(decoded, dict) else 0
+                    collaborate_with = decoded.get('collaborate_with', []) if isinstance(decoded, dict) else []
+
+                    # Count collaborators
+                    if isinstance(collaborate_with, (list, np.ndarray)):
+                        n_collab = int(np.sum(collaborate_with))
+                    else:
+                        n_collab = 0
 
                     # put_effort is 1-based slot index: 0=no project, 1=slot 0, 2=slot 1, etc.
                     effort_slot = put_effort - 1 if put_effort > 0 else -1
+
+                    # Build action string
+                    action_str = f"choose_project={choose_project}, put_effort={put_effort}"
 
                     if put_effort > 0:
                         # Show which slot receives effort
@@ -1053,13 +1308,21 @@ def run_simulation_with_rl_agent(cfg: EvalConfig) -> dict:
                         if effort_slot < len(all_project_slots):
                             target_proj = all_project_slots[effort_slot]
                             if target_proj is not None:
-                                print(f"DEBUG Step {step}: action=(choose_project={choose_project}, put_effort={put_effort} → [Slot {effort_slot}] {target_proj})")
+                                action_str += f" → [Slot {effort_slot}] {target_proj}"
                             else:
-                                print(f"DEBUG Step {step}: action=(choose_project={choose_project}, put_effort={put_effort} → [Slot {effort_slot}] EMPTY)")
-                        else:
-                            print(f"DEBUG Step {step}: action=(choose_project={choose_project}, put_effort={put_effort})")
-                    else:
-                        print(f"DEBUG Step {step}: action=(choose_project={choose_project}, put_effort={put_effort})")
+                                action_str += f" → [Slot {effort_slot}] EMPTY"
+
+                    action_str += f", collaborate_with={n_collab} agents"
+
+                    # Show which agents are selected for collaboration (indices where value is 1)
+                    if n_collab > 0 and isinstance(collaborate_with, (list, np.ndarray)):
+                        collab_indices = [i for i, v in enumerate(collaborate_with) if v == 1]
+                        if len(collab_indices) <= 10:  # Show all if 10 or fewer
+                            action_str += f" (agents: {collab_indices})"
+                        else:  # Show first 10 if more
+                            action_str += f" (first 10: {collab_indices[:10]}...)"
+
+                    print(f"DEBUG Step {step}: action=({action_str})")
 
                 actions[agent] = decoded
             else:
@@ -1120,19 +1383,33 @@ def run_simulation_with_rl_agent(cfg: EvalConfig) -> dict:
         # ---- Update stats ----
         stats.update(env, observations, rewards, terminations, truncations)
 
+        # ---- Update RL agent status snapshot AFTER step for accurate logging ----
+        # This ensures rewardless_steps and other counters reflect the current state
+        if env.active_agents[rl_status.agent_idx] == 1 and rl_status.terminated_step is None:
+            rl_status.snapshot(env)
+
         # ---- Periodic progress ----
         if step % 10 == 0:
             if cfg.debug_sim:
                 n_active = int(np.sum(env.active_agents))
-                print(
-                    f"Step {step:3d}: total active agents: {n_active} "
-                    f"RL {rl_status.agent_id}: age={rl_status.age} "
-                    f"rewardless={rl_status.rewardless_steps} "
-                    f"projects(active={rl_status.n_active_projects}, "
-                    f"done={rl_status.completed_projects}, "
-                    f"published={rl_status.successful_projects}) "
-                    f"reward total = {rl_status.total_reward:.4f}"
-                )
+                if rl_status.terminated_step is not None:
+                    # Agent is terminated, show TERMINATED status
+                    print(
+                        f"Step {step:3d}: total active agents: {n_active} "
+                        f"RL {rl_status.agent_id}: TERMINATED (step {rl_status.terminated_step}) "
+                        f"reward total = {rl_status.total_reward:.4f}"
+                    )
+                else:
+                    # Agent is still active
+                    print(
+                        f"Step {step:3d}: total active agents: {n_active} "
+                        f"RL {rl_status.agent_id}: age={rl_status.age} "
+                        f"rewardless={rl_status.rewardless_steps} "
+                        f"projects(active={rl_status.n_active_projects}, "
+                        f"done={rl_status.completed_projects}, "
+                        f"published={rl_status.successful_projects}) "
+                        f"reward total = {rl_status.total_reward:.4f}"
+                    )
 
         # ---- Check if all agents are done ----
         if all(terminations.values()):
@@ -1147,7 +1424,7 @@ def run_simulation_with_rl_agent(cfg: EvalConfig) -> dict:
             break
 
     # ---- 7) Save results ----
-    env.area.save(f"log/{cfg.output_file_prefix}_area.pickle")
+    env.area.save(os.path.join(output_dir, f"{cfg.output_file_prefix}_area.pickle"))
     log.log_projects(env.projects.values())
 
     results = {
@@ -1213,6 +1490,13 @@ def parse_args() -> EvalConfig:
             "Run simulation with a trained RL agent (agent_0) "
             "and heuristic policies for all others."
         )
+    )
+
+    # Algorithm
+    parser.add_argument(
+        "--algo", type=str, default="PPO",
+        choices=["PPO", "APPO"],
+        help="RL algorithm to use (default: PPO)",
     )
 
     # Checkpoint
@@ -1322,6 +1606,7 @@ def parse_args() -> EvalConfig:
         args.debug_sim = True
 
     return EvalConfig(
+        algo=args.algo,
         checkpoint_path=args.checkpoint,
         n_agents=args.n_agents,
         start_agents=args.start_agents,
@@ -1365,18 +1650,19 @@ if __name__ == "__main__":
     # base_config.checkpoint_path = "checkpoints/my_checkpoint"
     
     # Environment Parameter (Beispielwerte für 451 Features)
-    ENABLE_MANUAL_OVERRIDES = False
+    ENABLE_MANUAL_OVERRIDES = True
     if ENABLE_MANUAL_OVERRIDES:
-        base_config.n_agents = 60
-        base_config.start_agents = 100
+        base_config.n_agents = 400
+        base_config.start_agents = 300
         base_config.max_steps = 600
         base_config.max_rewardless_steps = 50
         base_config.n_groups = 10
-        base_config.max_peer_group_size = 10
+        base_config.max_peer_group_size = 40
         base_config.n_projects_per_step = 1
         base_config.max_projects_per_agent = 8
         base_config.max_agent_age = 750
         base_config.acceptance_threshold = 0.44
+        base_config.reward_function = "by_effort"
 
         # Heuristik-Schwellenwerte
         base_config.prestige_threshold = 0.29
@@ -1385,7 +1671,6 @@ if __name__ == "__main__":
 
         # Simulation
         base_config.deterministic = True
-        base_config.seed = 42
     
     # Debugging
     # base_config.debug_sim = True
@@ -1441,7 +1726,7 @@ if __name__ == "__main__":
             config = base_config.copy_with(
                 reward_function=reward_fn,
                 seed=current_seed,
-                output_file_prefix=f"rl_ppo_{reward_fn}_s{current_seed}"
+                output_file_prefix=f"rl_{base_config.algo.lower()}_{reward_fn}_s{current_seed}"
             )
             
             print(f"\n--- Run {i+1}/{num_seeds} | Seed: {current_seed} | Reward: {reward_fn} ---")

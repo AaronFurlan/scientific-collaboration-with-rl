@@ -1,15 +1,5 @@
 #!/usr/bin/env python3
-"""
-Aggregate observations and actions from test_results subdirectories
-for use in the archetype similarity analysis notebook.
-
-This script:
-1. Scans test_results/ for subdirectories with seeds 501-520
-2. Loads actions and observations JSONL files
-3. Extracts agent_0 (RL agent) data
-4. Adds metadata (seed, step, episode)
-5. Saves to parquet files for the similarity analysis notebook
-"""
+"""Aggregate RL agent observations and actions from test results for similarity analysis."""
 
 from pathlib import Path
 import json

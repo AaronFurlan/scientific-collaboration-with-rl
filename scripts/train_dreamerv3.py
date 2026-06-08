@@ -1,17 +1,6 @@
 """
-train_dreamerv3.py
-
-DreamerV3 training script for Game-of-Science environment with RLlib.
-
-Features:
-- GPU training with validation
-- MultiDiscrete action space support
-- Checkpoint management with configurable intervals
-- WandB integration (optional)
-- Smoke test mode for quick validation
-- Fair comparison with PPO wrapper
-
-DreamerV3 uses RLlib's new API stack (RLModule, EnvRunnerV2).
+Train DreamerV3 agent with RLlib for Game-of-Science environment.
+Supports GPU training, checkpointing, and WandB integration.
 """
 
 from __future__ import annotations
@@ -31,7 +20,6 @@ from ray import tune
 from ray.rllib.algorithms.dreamerv3 import DreamerV3Config
 from typing import Any, Callable, Dict, Optional
 
-# Add project root to path
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from src.agent_policies import (
@@ -44,11 +32,9 @@ from src.env.peer_group_environment import PeerGroupEnvironment
 from src.dreamerv3_wrapper import DreamerV3SingleAgentWrapper
 from src.callbacks.papers_metrics_callback import PapersMetricsCallback
 
-# Suppress Ray warnings
 os.environ["RAY_ACCEL_ENV_VAR_OVERRIDE_ON_ZERO"] = "0"
 os.environ["PYTHONWARNINGS"] = "ignore::DeprecationWarning"
 
-# Policy distribution presets
 POLICY_CONFIGS = {
     "Balanced": {"careerist": 0.33, "orthodox_scientist": 0.33, "mass_producer": 0.34},
     "CareeristHeavy": {"careerist": 0.7, "orthodox_scientist": 0.15, "mass_producer": 0.15},
@@ -58,16 +44,7 @@ POLICY_CONFIGS = {
 
 
 def check_cuda(num_gpus: int, abort_on_missing: bool = True) -> bool:
-    """
-    Check CUDA availability and log device information.
-
-    Args:
-        num_gpus: Number of GPUs requested
-        abort_on_missing: If True, raise error when CUDA unavailable but requested
-
-    Returns:
-        True if CUDA is available and can be used
-    """
+    """Check CUDA availability and log device info."""
     cuda_available = torch.cuda.is_available()
 
     print("=" * 70)

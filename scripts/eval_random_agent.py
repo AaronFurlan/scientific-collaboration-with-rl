@@ -1,16 +1,6 @@
 """
-eval_random_agent.py
-
-Runs the PeerGroupEnvironment simulation with a random agent controlling agent_0,
-while all other agents follow fixed heuristic policies.
-
-This script serves as a baseline evaluation to compare against trained RL agents.
-The random agent uniformly samples from valid (masked) actions at each timestep.
-
-Usage:
-    python scripts/eval_random_agent.py
-    python scripts/eval_random_agent.py --seed 42
-    python scripts/eval_random_agent.py --num-seeds 10 --all-rewards
+Baseline evaluation with random agent controlling one agent.
+Random agent samples from valid masked actions uniformly.
 """
 
 from __future__ import annotations
@@ -20,7 +10,6 @@ import json
 import os
 import sys
 
-# Add the project root to sys.path
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from dataclasses import dataclass, asdict
@@ -41,17 +30,10 @@ from scripts.log_simulation import SimLog
 from src.stats_tracker import SimulationStats
 
 
-# ---------------------------------------------------------------------------
-# Policy configs
-# ---------------------------------------------------------------------------
 POLICY_CONFIGS: Dict[str, Dict[str, float]] = {
     "Balanced": {"careerist": 1 / 3, "orthodox_scientist": 1 / 3, "mass_producer": 1 / 3}
 }
 
-
-# ---------------------------------------------------------------------------
-# Configuration
-# ---------------------------------------------------------------------------
 @dataclass
 class EvalConfig:
     """Configuration for random agent baseline evaluation."""
@@ -494,7 +476,7 @@ def run_simulation_with_random_agent(cfg: EvalConfig) -> dict:
             break
 
     # Save results
-    env.area.save(f"log/{cfg.output_file_prefix}_area.pickle")
+    env.area.save(os.path.join(output_dir, f"{cfg.output_file_prefix}_area.pickle"))
     log.log_projects(env.projects.values())
 
     results = {
@@ -557,7 +539,7 @@ def parse_args() -> tuple[EvalConfig, int, bool]:
 
     # Env parameters
     parser.add_argument("--n-agents", type=int, default=400)
-    parser.add_argument("--start-agents", type=int, default=100)
+    parser.add_argument("--start-agents", type=int, default=300)
     parser.add_argument("--max-steps", type=int, default=600)
     parser.add_argument("--max-rewardless-steps", type=int, default=50)
     parser.add_argument("--n-groups", type=int, default=10)

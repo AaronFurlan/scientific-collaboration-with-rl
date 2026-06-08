@@ -8,10 +8,7 @@ from tqdm import tqdm
 import numpy as np
 
 def find_latest_log_files(base_dir, strategy, seed):
-    """
-    Findet die neuesten Actions- und Observations-Dateien für eine gegebene Strategie und einen Seed.
-    Sucht nach Unterverzeichnissen wie rl_ppo_{strategy}_s{seed}_{timestamp}_s{seed}/
-    """
+    """Find latest actions and observations files for given strategy and seed."""
     pattern = re.compile(f"rl_ppo_{strategy}_s{seed}_(\\d{{8}}_\\d{{6}})_s{seed}")
     
     candidates = []
@@ -32,8 +29,7 @@ def find_latest_log_files(base_dir, strategy, seed):
     
     if not candidates:
         return None, None
-    
-    # Nach Zeitstempel absteigend sortieren
+
     candidates.sort(key=lambda x: x[0], reverse=True)
     latest_dir = candidates[0][1]
     
@@ -46,27 +42,16 @@ def find_latest_log_files(base_dir, strategy, seed):
     return None, None
 
 def flatten_observation(obs_dict):
-    """
-    Flacht eine Observation-Struktur ab, um sie in ein DataFrame-Format zu bringen.
+    """Flatten observation structure for DataFrame format.
     Konzentriert sich auf skalare Werte und flacht Listen/Arrays ab.
     """
     if not obs_dict or not isinstance(obs_dict, dict):
         return {}
     
     flat = {}
-    # 'observation' ist oft ein langes Array, das wir hier ggf. nicht komplett flachziehen wollen
-    # aber Metriken wie accumulated_rewards, age, etc. sind wichtig.
-    
-    if "observation" in obs_dict:
-        # Hier könnten wir das Feature-Vektor-Array speichern, falls benötigt.
-        # Aber für die Analyse sind oft die benannten Felder in 'observation' (falls vorhanden) 
-        # oder Metriken wichtiger.
-        pass
 
     for k, v in obs_dict.items():
         if k == "observation" and isinstance(v, list):
-            # Optional: Feature-Vektor als String oder Liste belassen
-            # flat["obs_vector"] = v 
             continue
         
         if isinstance(v, list) and len(v) == 1:
@@ -77,8 +62,7 @@ def flatten_observation(obs_dict):
     return flat
 
 def build_combined_dataframe(observations, actions, seed, strategy):
-    """
-    Kombiniert Observations und Actions in ein einziges DataFrame.
+    """Combine observations and actions into single DataFrame.
     Jede Zeile repräsentiert einen Agenten in einem Zeitschritt.
     """
     records = []

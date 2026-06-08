@@ -10,16 +10,7 @@ from scripts.train_rl_agent import main as train_main
 import ray
 
 def sweep_train():
-    """
-    Diese Funktion wird von wandb.agent() für jeden Run aufgerufen.
-    Sie liest die Hyperparameter aus wandb.config und übergibt sie an das Hauptskript.
-    """
-    # 1. Initialisiere WandB für diesen spezifischen Run des Sweeps
-    # Das Hauptskript train_rl_agent.py ruft intern wandb.init() auf, 
-    # aber wenn wir es im Sweep-Modus betreiben, übernimmt wandb.agent() das Setup.
-    # Wir übergeben wandb_mode="online" an train_main, damit es dort korrekt geloggt wird.
-    
-    # Erhöht den HTTP-Timeout für GraphQL-Anfragen (Standard ist oft zu niedrig)
+    """Called by wandb.agent() for each sweep run."""
     os.environ["WANDB_HTTP_TIMEOUT"] = "180"
 
     with wandb.init() as run:

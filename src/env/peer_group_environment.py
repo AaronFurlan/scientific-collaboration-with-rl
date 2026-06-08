@@ -49,7 +49,6 @@ class PeerGroupEnvironment(ParallelEnv):
         self.max_projects_per_agent: int = max_projects_per_agent
         self.max_agent_age: int = max_agent_age
         self.use_light_policy_obs: bool = use_light_policy_obs
-        # RL Reproducibility: dedicated RNG instance
         self.rng: np.random.Generator = np.random.default_rng()
         self.age_distribution = GaussianMixture(
             weights=[0.5, 0.5],
@@ -62,7 +61,7 @@ class PeerGroupEnvironment(ParallelEnv):
         self.growth_rate: float = growth_rate
         self.acceptance_threshold: float = acceptance_threshold
         self.render_mode: Optional[str] = None
-        self.debug_light_obs: bool = False # TEMP: Zeitmessung
+        self.debug_light_obs: bool = False
 
         self.possible_agents: List[str] = [f"agent_{i}" for i in range(self.n_agents)]
         self.agent_to_id: Dict[str, int] = {

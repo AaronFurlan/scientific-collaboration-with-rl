@@ -1,11 +1,4 @@
-"""
-DreamerActionHandler: Action Space Definition und Dekodierung für DreamerV3.
-
-Diese Klasse kümmert sich um:
-- Definition des Action Space (Box oder Discrete)
-- Dekodierung kontinuierlicher Aktionen zu diskret/binären Aktionen
-- Consistent Action Space Management
-"""
+"""Action space definition and decoding for DreamerV3."""
 
 import numpy as np
 import gymnasium as gym
@@ -17,17 +10,7 @@ logger = logging.getLogger(__name__)
 
 
 class DreamerActionHandler:
-    """
-    Definiert und dekodiert Action Spaces für DreamerV3.
-
-    Unterstützt Box-Space (primär für DreamerV3's ActorNetwork) und
-    kann über CLI auf Discrete/MultiDiscrete umgestellt werden.
-
-    Dekodierung:
-    - choose_project: kontinuierlich [0,1] → diskret [0, CP-1]
-    - put_effort: kontinuierlich [0,1] → diskret [0, PE-1]
-    - collaborate_with: kontinuierlich [0,1]^CB → binär {0,1}^CB (Threshold 0.5)
-    """
+    """Defines and decodes action spaces for DreamerV3 (Box/Discrete)."""
 
     def __init__(
         self,
@@ -38,20 +21,15 @@ class DreamerActionHandler:
     ):
         """
         Args:
-            n_projects_per_step: Maximale Anzahl Projekte zum Starten pro Step
-            max_projects_per_agent: Maximale Anzahl aktiver Projekte
-            max_peer_group_size: Größe der Peer Group (für Collaboration)
-            action_space_type: "box" (default), "discrete", oder "multidiscrete"
-                - "box": Kontinuierlich [0,1]^(2+CB) - am besten für DreamerV3
-                - "discrete": Großer Single-Discrete Space (nicht empfohlen, oft zu groß)
-                - "multidiscrete": MultiDiscrete([CP, PE, 2^CB]) (nicht für DreamerV3)
+            n_projects_per_step: Max projects to start per step
+            max_projects_per_agent: Max active projects per agent
+            max_peer_group_size: Peer group size for collaboration
+            action_space_type: "box" (default), "discrete", or "multidiscrete"
         """
         self._CP = int(n_projects_per_step + 1)
         self._PE = int(max_projects_per_agent + 1)
         self._CB = int(max_peer_group_size)
         self.action_space_type = action_space_type.lower()
-
-        # Create action space based on type
         self.action_space = self._create_action_space()
 
         logger.info(
@@ -63,15 +41,10 @@ class DreamerActionHandler:
     def _create_action_space(self) -> gym.Space:
         """Factory method to create appropriate action space."""
         if self.action_space_type == "box":
-            # Continuous Box [0, 1] - first 2 are scalars for CP/PE, rest are bits for CB
-            # Most efficient and compatible with DreamerV3's ActorNetwork
             action_dim = 2 + self._CB
             return Box(low=0.0, high=1.0, shape=(action_dim,), dtype=np.float32)
 
         elif self.action_space_type == "discrete":
-            # Single large Discrete space (flattened)
-            # Total size = CP * PE * (2^CB)
-            # WARNING: Often extremely large and problematic!
             total_discrete_size = self._CP * self._PE * (2 ** self._CB)
             logger.warning(
                 f"Creating Discrete action space of size {total_discrete_size}. "
@@ -80,8 +53,6 @@ class DreamerActionHandler:
             return Discrete(total_discrete_size)
 
         elif self.action_space_type == "multidiscrete":
-            # MultiDiscrete space
-            # WARNING: Not compatible with DreamerV3's ActorNetwork!
             logger.warning(
                 f"Creating MultiDiscrete action space. "
                 f"This is NOT compatible with DreamerV3's ActorNetwork!"
