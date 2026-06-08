@@ -1,6 +1,8 @@
 __pycache__
 log/
 .idea/
+.venv
+.venv_appo
 
 # LaTeX
 thesis/*.aux
@@ -27,6 +29,8 @@ artifacts/
 iteration_time/
 test_results/
 notebooks/analysis_results
+notebooks/plots
+output_jsons/
 *.pt
 *.ckpt
 *.pkl
