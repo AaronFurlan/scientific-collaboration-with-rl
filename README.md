@@ -12,6 +12,10 @@ python -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 ```
+**Disclaimer**: Because a version mismatch between the rllib for ppo and appo the following rllib version is requiered to evaluate the appo checkpoints:
+- `ray[rllib] == 2.55.1'
+
+A workaround that i used is to create a second virtual environment with the needed version, then switching to that venv to evaluate appo.
 
 ## General
 
@@ -127,13 +131,15 @@ Processing can be done wiht the scripts:
 - `analysis/process_rl_actions_and_obs.py`
 
 Notebooks:
-- `aggregate_obs_actions_for_similarity_analysis.py`: Analyze observation and action patterns
-- `benchmark_light_observation.py`: Compare performance of light vs. full observations
-- `validate_light_observation.py`: Verify correctness of light observation wrapper
+- `analyse_similarity_with_agent0_obs.ipynb`: Compare archetype action with agent 0 action with agent0 observations
+- `analyze_choose_project_action.ipynb`: Indepth choose_project analysis
+- `analyze_collaborate_action.ipynb`: Indepth collaborate analysis
+- `analyze_put_effort_action.ipynb`: Indepth put_effort analysis
+- `analyze_peer_selection_patterns.ipynb`: Indepth peer selection patterns analysis
+- `analyze_sensitivity.ipynb`: Policy ensitivity analysis on logit level 
+- `compare_controlled_agents_performance.ipynb`: Compares the performance of the controlled agents
+- `archetypes_vs_controlled_agents.ipynb`: Compares the controlled agents (ppo, appo, random) to the archetypes
 
-## Overleaf workflow
-- After writing in Overleaf pull the latest version from Overleaf with `git subtree pull --prefix thesis overleaf OVERLEAF_BRANCH --squash`
-- then `git push origin main`
 
 
 
